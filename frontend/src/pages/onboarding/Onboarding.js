@@ -114,7 +114,7 @@ export default function Onboarding() {
             <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
               <Sprout size={16} className="text-primary-foreground" />
             </div>
-            <span className="font-semibold text-lg" style={{ fontFamily: "Outfit, sans-serif" }}>AgriFlow</span>
+            <span className="font-semibold text-lg" style={{ fontFamily: "Outfit, sans-serif" }}>Dat'Agro</span>
           </div>
           <h1 className="text-2xl font-medium text-foreground" style={{ fontFamily: "Outfit, sans-serif" }}>
             Bienvenue, {user?.first_name} !

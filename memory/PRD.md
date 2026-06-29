@@ -1,7 +1,7 @@
-# AgriFlow — PRD (Product Requirements Document)
+# Dat'Agro — PRD (Product Requirements Document)
 
 ## Vue d'ensemble
-**Produit** : AgriFlow — Plateforme SaaS d'agriculture connectée  
+**Produit** : Dat'Agro — Plateforme SaaS d'agriculture connectée  
 **Dernière mise à jour** : 2024-01-01  
 **Version** : 1.0.0 MVP  
 
@@ -58,13 +58,13 @@ Plateforme web full-stack permettant aux agriculteurs et administrateurs de :
 - Frontend : 95% (flux complets validés)
 
 ## Comptes de test
-- Admin: admin@agriflow.com / AgriFlow2024!
+- Admin: admin@datagro.com / Dat'Agro2024!
 - Farmer test: uifarmer_1782764007@test.com / TestFarmer2024!
 
 ## Personas utilisateur
 1. **Jean Dupont** — agriculteur céréalier, 50 ha en Beauce, non-technicien, veut des alertes simples et des tableaux de bord lisibles
 2. **Marie Martin** — exploitante maraîchère, plusieurs parcelles, veut suivre NPK et humidité en temps réel
-3. **Admin AgriFlow** — supervise la plateforme, valide les comptes, surveille les incidents
+3. **Admin Dat'Agro** — supervise la plateforme, valide les comptes, surveille les incidents
 
 ## Fonctionnalités reportées (Backlog P1/P2)
 

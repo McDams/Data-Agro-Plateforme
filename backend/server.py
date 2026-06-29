@@ -15,7 +15,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
 
 # ─── App ──────────────────────────────────────────────────────────────────────
-app = FastAPI(title="AgriFlow API", version="1.0.0")
+app = FastAPI(title="Dat'Agro API", version="1.0.0")
 api_router = APIRouter(prefix="/api")
 
 # ─── MongoDB ──────────────────────────────────────────────────────────────────
@@ -51,7 +51,7 @@ def _parse_oid(v: Any) -> str:
 PyObjectId = Annotated[str, BeforeValidator(_parse_oid)]
 
 # ─── Auth helpers ─────────────────────────────────────────────────────────────
-JWT_SECRET = os.environ.get("JWT_SECRET", "fallback-agriflow-secret-change-me")
+JWT_SECRET = os.environ.get("JWT_SECRET", "fallback-datagro-secret-change-me")
 JWT_ALG = "HS256"
 
 def hash_password(pwd: str) -> str:
@@ -187,14 +187,14 @@ async def startup():
     await db.alerts.create_index([("owner_id", 1), ("is_resolved", 1)])
     await db.predictions.create_index([("plot_id", 1), ("created_at", -1)])
 
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@agriflow.com")
-    admin_pwd = os.environ.get("ADMIN_PASSWORD", "AgriFlow2024!")
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@datagro.com")
+    admin_pwd = os.environ.get("ADMIN_PASSWORD", "DatAgro2024!")
     now = datetime.now(timezone.utc)
     existing = await db.users.find_one({"email": admin_email})
     if existing is None:
         await db.users.insert_one({
-            "first_name": "Admin", "last_name": "AgriFlow", "email": admin_email,
-            "phone": "+33 1 00 00 00 00", "farm_name": "AgriFlow Platform", "country": "France",
+            "first_name": "Admin", "last_name": "Dat'Agro", "email": admin_email,
+            "phone": "+33 1 00 00 00 00", "farm_name": "Dat'Agro Platform", "country": "France",
             "role": "admin", "status": "active",
             "password_hash": hash_password(admin_pwd), "onboarding_completed": True,
             "created_at": now, "updated_at": now
@@ -204,7 +204,7 @@ async def startup():
 
     Path("/app/memory").mkdir(exist_ok=True)
     Path("/app/memory/test_credentials.md").write_text(
-        f"# Credentials de test AgriFlow\n\n"
+        f"# Credentials de test Dat'Agro\n\n"
         f"## Admin\n- Email: {admin_email}\n- Mot de passe: {admin_pwd}\n- Rôle: admin\n\n"
         f"## Endpoints Auth\n- POST /api/auth/register\n- POST /api/auth/login\n"
         f"- POST /api/auth/logout\n- GET /api/auth/me\n"

@@ -109,7 +109,7 @@ export default function Analytics() {
     const csv = [headers.join(","), ...rows].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = "agriflow-donnees.csv"; a.click();
+    const a = document.createElement("a"); a.href = url; a.download = "datagro-donnees.csv"; a.click();
     URL.revokeObjectURL(url);
     toast.success("Export CSV téléchargé");
   };

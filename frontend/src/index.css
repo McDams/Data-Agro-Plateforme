@@ -6,7 +6,7 @@
 
 @layer base {
   :root {
-    /* AgriFlow Light Theme */
+    /* Dat'Agro Light Theme */
     --background: 120 15% 97%;
     --foreground: 135 21% 7%;
     --card: 0 0% 100%;
@@ -39,7 +39,7 @@
   }
 
   .dark {
-    /* AgriFlow Dark Theme */
+    /* Dat'Agro Dark Theme */
     --background: 135 14% 6%;
     --foreground: 120 8% 95%;
     --card: 150 13% 9%;

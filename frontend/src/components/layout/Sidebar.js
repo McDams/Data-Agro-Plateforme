@@ -67,7 +67,7 @@ export function SidebarContent({ collapsed, onClose }) {
               <Sprout size={16} className="text-primary-foreground" />
             </div>
             <span className="font-semibold text-base text-foreground" style={{ fontFamily: "Outfit, sans-serif" }}>
-              AgriFlow
+              Dat'Agro
             </span>
           </div>
         )}

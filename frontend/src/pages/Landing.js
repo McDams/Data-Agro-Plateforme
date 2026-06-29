@@ -59,7 +59,7 @@ export default function Landing() {
               <Sprout size={16} className="text-primary-foreground" />
             </div>
             <span className="font-semibold text-lg text-foreground" style={{ fontFamily: "Outfit, sans-serif" }}>
-              AgriFlow
+              Dat'Agro
             </span>
           </div>
           <div className="flex items-center gap-3">
@@ -92,7 +92,7 @@ export default function Landing() {
             <span className="text-primary">avec la donnée terrain</span>
           </h1>
           <p className="text-lg text-muted-foreground max-w-2xl mx-auto mb-10 leading-relaxed">
-            AgriFlow centralise vos capteurs IoT, analyse vos données de sol et d'environnement,
+            Dat'Agro centralise vos capteurs IoT, analyse vos données de sol et d'environnement,
             et vous aide à prendre de meilleures décisions agronomiques — à temps.
           </p>
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
@@ -144,7 +144,7 @@ export default function Landing() {
           <div className="grid md:grid-cols-2 gap-12 items-center">
             <div>
               <h2 className="text-2xl sm:text-3xl font-medium text-foreground mb-6" style={{ fontFamily: "Outfit, sans-serif" }}>
-                Pourquoi les agriculteurs choisissent AgriFlow
+                Pourquoi les agriculteurs choisissent Dat'Agro
               </h2>
               <ul className="space-y-4">
                 {benefits.map((b) => (
@@ -209,11 +209,11 @@ export default function Landing() {
               <Sprout size={12} className="text-primary-foreground" />
             </div>
             <span className="text-sm font-semibold text-foreground" style={{ fontFamily: "Outfit, sans-serif" }}>
-              AgriFlow
+              Dat'Agro
             </span>
           </div>
           <p className="text-xs text-muted-foreground">
-            © 2024 AgriFlow. Plateforme d'agriculture connectée.
+            © 2024 Dat'Agro. Plateforme d'agriculture connectée.
           </p>
         </div>
       </footer>

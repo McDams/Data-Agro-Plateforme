@@ -15,7 +15,7 @@ export default function SystemSettings() {
         <h1 className="text-2xl font-medium text-foreground" style={{ fontFamily: "Outfit, sans-serif" }}>
           Paramètres système
         </h1>
-        <p className="text-sm text-muted-foreground">Configuration de la plateforme AgriFlow</p>
+        <p className="text-sm text-muted-foreground">Configuration de la plateforme Dat'Agro</p>
       </div>
 
       <Card>
@@ -93,7 +93,7 @@ export default function SystemSettings() {
             { l: "Framework Backend", v: "FastAPI (Python)" },
             { l: "Framework Frontend", v: "React 19" },
             { l: "Base de données", v: "MongoDB" },
-            { l: "Licence", v: "AgriFlow Platform © 2024" },
+            { l: "Licence", v: "Dat'Agro Platform © 2024" },
           ].map(({ l, v }) => (
             <div key={l} className="flex justify-between py-1 border-b border-border/50 last:border-0">
               <span className="text-muted-foreground">{l}</span>

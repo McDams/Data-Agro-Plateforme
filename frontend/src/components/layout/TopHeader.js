@@ -56,7 +56,7 @@ export default function TopHeader() {
             <Sprout size={14} className="text-primary-foreground" />
           </div>
           <span className="font-semibold text-sm text-foreground" style={{ fontFamily: "Outfit, sans-serif" }}>
-            AgriFlow
+            Dat'Agro
           </span>
         </div>
       </div>

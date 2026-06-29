@@ -59,7 +59,7 @@ export default function AdminDashboard() {
         <h1 className="text-2xl font-medium text-foreground" style={{ fontFamily: "Outfit, sans-serif" }}>
           Administration
         </h1>
-        <p className="text-sm text-muted-foreground">Vue globale de la plateforme AgriFlow</p>
+        <p className="text-sm text-muted-foreground">Vue globale de la plateforme Dat'Agro</p>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

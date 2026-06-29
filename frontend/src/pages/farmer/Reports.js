@@ -35,7 +35,7 @@ export default function Reports() {
     setGenerating(type);
     await new Promise(r => setTimeout(r, 1200));
     const content = buildReport(type);
-    downloadReport(content, `agriflow-rapport-${type}.txt`);
+    downloadReport(content, `datagro-rapport-${type}.txt`);
     setGenerating(null);
     toast.success("Rapport téléchargé");
   };
@@ -106,7 +106,7 @@ export default function Reports() {
     const csv = rows.map(r => r.join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href = url; a.download = "agriflow-export-complet.csv"; a.click();
+    const a = document.createElement("a"); a.href = url; a.download = "datagro-export-complet.csv"; a.click();
     URL.revokeObjectURL(url);
     toast.success("Export CSV téléchargé");
   };

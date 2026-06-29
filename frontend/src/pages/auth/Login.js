@@ -45,7 +45,7 @@ export default function Login() {
               <Sprout size={20} className="text-primary-foreground" />
             </div>
             <span className="font-semibold text-xl text-foreground" style={{ fontFamily: "Outfit, sans-serif" }}>
-              AgriFlow
+              Dat'Agro
             </span>
           </Link>
           <h1 className="text-2xl font-medium text-foreground" style={{ fontFamily: "Outfit, sans-serif" }}>

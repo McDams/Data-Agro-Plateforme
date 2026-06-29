@@ -35,7 +35,7 @@ export default function ForgotPassword() {
             <div className="w-10 h-10 rounded-xl bg-primary flex items-center justify-center">
               <Sprout size={20} className="text-primary-foreground" />
             </div>
-            <span className="font-semibold text-xl" style={{ fontFamily: "Outfit, sans-serif" }}>AgriFlow</span>
+            <span className="font-semibold text-xl" style={{ fontFamily: "Outfit, sans-serif" }}>Dat'Agro</span>
           </Link>
           <h1 className="text-2xl font-medium text-foreground" style={{ fontFamily: "Outfit, sans-serif" }}>
             Mot de passe oublié
