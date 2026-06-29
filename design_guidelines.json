@@ -1,0 +1,89 @@
+{
+  "theme": "LIGHT",
+  "archetype": "Organic & Earthy",
+  "design_philosophy": "Premium smart-agriculture aesthetic: modern SaaS dashboard quality, calm earthy neutrals, elegant green/teal accents, subtle agricultural tone, clean professional cards, high readability, minimal clutter.",
+  "typography": {
+    "heading_font": "Outfit",
+    "body_font": "IBM Plex Sans",
+    "scale": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tight font-medium",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight",
+      "h3": "text-xl sm:text-2xl font-medium",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body": "text-base",
+      "small": "text-sm text-muted-foreground",
+      "overline": "text-xs tracking-[0.2em] uppercase font-semibold"
+    }
+  },
+  "colors": {
+    "light": {
+      "background": "#F8FAF8",
+      "surface": "#FFFFFF",
+      "border": "#E5EBE7",
+      "text_primary": "#0F1712",
+      "text_secondary": "#4B5563",
+      "primary": "#166534",
+      "primary_hover": "#14532D",
+      "success": "#22C55E",
+      "warning": "#F59E0B",
+      "danger": "#EF4444"
+    },
+    "dark": {
+      "background": "#0D110F",
+      "surface": "#141A17",
+      "border": "#242E28",
+      "text_primary": "#F3F4F6",
+      "text_secondary": "#9CA3AF",
+      "primary": "#4ADE80",
+      "primary_hover": "#22C55E",
+      "success": "#22C55E",
+      "warning": "#FBBF24",
+      "danger": "#F87171"
+    }
+  },
+  "layout": {
+    "navigation": "Left sidebar (w-64 on desktop) + Top header (h-16). Mobile-friendly drawer for small screens.",
+    "spacing_system": "Tailwind scale. Generous padding (p-8, p-12) for empty states/marketing; compact padding (p-4, p-6) for dense dashboard cards.",
+    "grid_strategy": "Control Room Grid for dashboard: grid-cols-1 md:grid-cols-3 lg:grid-cols-4. F-Pattern for F-KPIs. Tight gap (gap-4 or gap-6)."
+  },
+  "surfaces_and_components": {
+    "cards": "Subtle roundness (max 8px border-radius, rounded-lg), flat background, 1px subtle border (border-border), no massive shadow. Hover: slight lift (-translate-y-1) and subtle shadow.",
+    "buttons": "Primary color with explicit hover states. Focus states must use ring-2.",
+    "charts": "Recharts. Use semantic colors (green/healthy, amber/warning, red/critical). Avoid complex charts; use Line Charts for trends, Bar for comparisons.",
+    "data_testid_rule": "All interactive and key informational elements MUST include a 'data-testid' attribute in kebab-case based on role (e.g., data-testid='login-form-submit-button')."
+  },
+  "icons": {
+    "library": "@phosphor-icons/react",
+    "installation_command": "yarn add @phosphor-icons/react",
+    "usage": "Use Phosphor Icons (Duotone weight) for high-end SaaS aesthetic."
+  },
+  "media": {
+    "image_urls": [
+      {
+        "category": "hero_background",
+        "url": "https://images.pexels.com/photos/10201586/pexels-photo-10201586.jpeg",
+        "description": "Drone shot of a corn harvester in a lush green field"
+      },
+      {
+        "category": "farmer_silhouette",
+        "url": "https://images.unsplash.com/photo-1536259743269-55b34c2e942c",
+        "description": "Farmer walking on field with tablet"
+      },
+      {
+        "category": "brand_logo_placeholder",
+        "url": "https://images.unsplash.com/photo-1658204238967-3a81a063d162?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NTY2Nzh8MHwxfHNlYXJjaHwyfHxjb21wYW55JTIwbG9nbyUyMGxlYWZ8ZW58MHx8fHwxNzgyNzYyMTk3fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Green block with white O/leaf shape"
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "Interface language MUST be strictly French.",
+    "Implement full-stack React frontend (.js files) + FastAPI backend + MongoDB.",
+    "Implement logic-based predictions on sensor data (no LLMs).",
+    "Implement Left sidebar + Top header layout.",
+    "Add 'data-testid' attributes to all interactive elements for testing.",
+    "Use custom Shadcn UI components. Ensure no generic Bootstrap look. Maintain a calm, professional B2B agritech vibe.",
+    "Follow 'Control Room' grid layout for the dashboard. F-pattern for reading KPIs.",
+    "Implement Dark mode seamlessly. Ensure dark mode uses deep earthy green/black (#0D110F), not just pure gray."
+  ]
+}
