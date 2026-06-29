@@ -229,10 +229,13 @@ async def register(data: RegisterReq, response: Response):
         "created_at": now, "updated_at": now
     })
     uid = str(result.inserted_id)
-    set_cookies(response, create_access_token(uid, email), create_refresh_token(uid))
+    at = create_access_token(uid, email)
+    rt = create_refresh_token(uid)
+    set_cookies(response, at, rt)
     return {"id": uid, "first_name": data.first_name, "last_name": data.last_name,
             "email": email, "role": "farmer", "status": "active",
-            "onboarding_completed": False, "farm_name": data.farm_name}
+            "onboarding_completed": False, "farm_name": data.farm_name,
+            "access_token": at, "refresh_token": rt}
 
 @api_router.post("/auth/login")
 async def login(data: LoginReq, request: Request, response: Response):
@@ -254,11 +257,14 @@ async def login(data: LoginReq, request: Request, response: Response):
         raise HTTPException(403, "Compte suspendu. Contactez l'administrateur.")
     await db.login_attempts.delete_one({"identifier": key})
     uid = str(user["_id"])
-    set_cookies(response, create_access_token(uid, email), create_refresh_token(uid))
+    at = create_access_token(uid, email)
+    rt = create_refresh_token(uid)
+    set_cookies(response, at, rt)
     return {"id": uid, "first_name": user.get("first_name"), "last_name": user.get("last_name"),
             "email": user["email"], "role": user.get("role", "farmer"),
             "status": user.get("status"), "onboarding_completed": user.get("onboarding_completed", False),
-            "farm_name": user.get("farm_name"), "phone": user.get("phone"), "country": user.get("country")}
+            "farm_name": user.get("farm_name"), "phone": user.get("phone"), "country": user.get("country"),
+            "access_token": at, "refresh_token": rt}
 
 @api_router.post("/auth/logout")
 async def logout(response: Response):
@@ -273,15 +279,21 @@ async def me(request: Request):
 @api_router.post("/auth/refresh")
 async def refresh(request: Request, response: Response):
     token = request.cookies.get("refresh_token")
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = request.headers.get("X-Refresh-Token", "")
+        token = request.headers.get("X-Refresh-Token", "") or token
     if not token: raise HTTPException(401, "Token manquant")
     try:
         p = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
         if p.get("type") != "refresh": raise HTTPException(401, "Token invalide")
         user = await db.users.find_one({"_id": ObjectId(p["sub"])})
         if not user: raise HTTPException(401, "Utilisateur introuvable")
-        response.set_cookie("access_token", create_access_token(p["sub"], user["email"]),
+        at = create_access_token(p["sub"], user["email"])
+        response.set_cookie("access_token", at,
                             httponly=True, secure=False, samesite="lax", max_age=7200, path="/")
-        return {"message": "Token rafraîchi"}
+        return {"message": "Token rafraîchi", "access_token": at}
     except jwt.InvalidTokenError:
         raise HTTPException(401, "Token invalide")
 
