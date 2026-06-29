@@ -1,91 +1,117 @@
-# Dat'Agro — PRD (Product Requirements Document)
+# Dat'Agro — Product Requirements Document
 
-## Vue d'ensemble
-**Produit** : Dat'Agro — Plateforme SaaS d'agriculture connectée  
-**Dernière mise à jour** : 2024-01-01  
-**Version** : 1.0.0 MVP  
+## Problème original
+Construire une application web full-stack responsive pour l'agriculture intelligente appelée "Dat'Agro". La plateforme fait interface entre agriculteurs, appareils IoT connectés, un pipeline de données et des modules de prédiction IA. Deux rôles : Agriculteur et Admin.
 
-## Contexte et objectifs
-Plateforme web full-stack permettant aux agriculteurs et administrateurs de :
-- Surveiller des capteurs IoT déployés dans les champs
-- Analyser données de sol et d'environnement
-- Visualiser des prédictions basées sur les données capteur
-- Gérer fermes, parcelles, appareils et alertes
+## Besoins produit
+- Auth complète avec sessions persistantes et accès basé sur les rôles
+- Onboarding guidé en 4 étapes pour les nouveaux agriculteurs
+- Tableaux de bord temps réel avec données capteurs IoT
+- Prédictions IA basées sur les données capteurs
+- Alertes automatiques sur seuils critiques
+- Dashboard admin de supervision
+- UI professionnelle, premium, data-driven (thème vert/terre)
+
+---
 
 ## Architecture technique
-- **Backend** : FastAPI (Python) — /app/backend/server.py
-- **Frontend** : React 19 — /app/frontend/src/
-- **Base de données** : MongoDB
-- **Auth** : JWT via httpOnly cookies, bcrypt pour les mots de passe
-- **Charts** : Recharts
-- **Icons** : lucide-react
-- **Style** : Tailwind CSS + shadcn/ui
-- **Fonts** : Outfit (headings) + IBM Plex Sans (body)
 
-## Rôles utilisateur
-1. **Farmer** (agriculteur) — dashboard, exploitations, parcelles, appareils, analytics, prédictions, alertes, rapports, profil
-2. **Admin** — dashboard admin, gestion utilisateurs, supervision exploitations/appareils, alertes, journal d'audit, paramètres système
+```
+Frontend (React 18 + Tailwind + Shadcn/UI) - Port 3000
+Backend (FastAPI + Motor async) - Port 8001
+MongoDB - localhost:27017
+Auth: JWT Bearer (localStorage) + httpOnly cookies (backup)
+```
 
-## Ce qui a été implémenté (MVP v1.0)
+---
 
-### Backend (server.py)
-- Auth complète : register, login, logout, me, refresh, forgot-password, reset-password
-- Protection anti-brute-force (5 tentatives max)
-- CRUD Exploitations (farms)
-- CRUD Parcelles (plots)
-- CRUD Appareils (devices) avec enrollment
-- Lectures capteur (sensor readings) avec génération automatique d'alertes
-- Moteur d'alertes automatiques basé sur seuils
-- Module prédictions : algorithme basé sur tendances 72h des capteurs
-- Module rapports
-- Notifications
-- Administration (stats, users, farms, devices, alerts, audit logs)
-- Onboarding (4 étapes : farm → plot → device → association)
-- Dashboard stats (KPIs calculés en temps réel)
+## Ce qui a été implémenté
 
-### Frontend
-- **Pages publiques** : Landing page, Login, Register, ForgotPassword, ResetPassword
-- **Onboarding** : Stepper guidé 4 étapes
-- **Farmer** : Dashboard (KPIs + charts), Exploitations, Parcelles, Appareils (+ simulateur de lectures), Analytics (charts ligne/aire/barre), Prédictions, Alertes, Rapports, Profil/Paramètres
-- **Admin** : Dashboard, Gestion utilisateurs, Exploitations, Appareils, Alertes, Journal d'audit, Paramètres système
-- Sidebar responsive (collapse sur desktop, drawer sur mobile)
-- Dark/Light mode (persisté en localStorage)
-- Toasts/notifications
-- Export CSV depuis les pages Analytics et Rapports
+### Session 1 (MVP initial)
+- ✅ Architecture complète full-stack (FastAPI + React + MongoDB)
+- ✅ Authentification JWT complète (register, login, logout, forgot/reset password)
+- ✅ Sessions persistantes — **localStorage Bearer token (fix bug P0)**
+- ✅ Protection des routes par rôle (farmer/admin)
+- ✅ Page d'accueil publique (Landing)
+- ✅ Onboarding 4 étapes (Farm → Plot → Device → Association)
+- ✅ Dashboard agriculteur avec KPIs temps réel
+- ✅ CRUD Exploitations, Parcelles, Appareils
+- ✅ Injection données capteurs + alertes automatiques
+- ✅ Analytiques (graphiques Recharts)
+- ✅ Prédictions IA (algorithme rule-based sur données capteurs)
+- ✅ Dashboard Admin avec stats globales
+- ✅ Gestion utilisateurs admin (suspension/activation)
+- ✅ Journaux d'audit
+- ✅ Mode clair/sombre
+- ✅ Renommage AgriFlow → Dat'Agro
+- ✅ README.md complet
 
-## Résultats des tests
-- Backend : 100% (19/19 tests)
-- Frontend : 95% (flux complets validés)
+### Session 2 (Bug fix P0)
+- ✅ **Fix bug onboarding**: passage cookie-only → Authorization Bearer (localStorage)
+  - Backend: register/login retournent `access_token` dans le corps
+  - Frontend api.js: intercepteur request ajoute `Authorization: Bearer`
+  - Frontend AuthContext.js: login() stocke token, logout() l'efface
+- ✅ README.md complet créé
 
-## Comptes de test
-- Admin: admin@datagro.com / Dat'Agro2024!
-- Farmer test: uifarmer_1782764007@test.com / TestFarmer2024!
+---
 
-## Personas utilisateur
-1. **Jean Dupont** — agriculteur céréalier, 50 ha en Beauce, non-technicien, veut des alertes simples et des tableaux de bord lisibles
-2. **Marie Martin** — exploitante maraîchère, plusieurs parcelles, veut suivre NPK et humidité en temps réel
-3. **Admin Dat'Agro** — supervise la plateforme, valide les comptes, surveille les incidents
+## Backlog prioritaire
 
-## Fonctionnalités reportées (Backlog P1/P2)
+### P1 — Prochaine itération
+- [ ] Intégration LLM réelle pour prédictions IA (Emergent LLM Key / Claude/GPT)
+  - Remplacer `_compute_predictions()` rule-based par appel LLM avec contexte capteurs
+  - Call `integration_playbook_expert_v2` pour Emergent LLM key
 
-### P1 (prochaine itération)
-- Envoi réel d'emails pour reset de mot de passe (intégration SendGrid/Resend)
-- Flux d'approbation admin pour nouveaux comptes farmers (pending → active)
-- Notifications en temps réel (WebSocket ou polling)
-- Page d'aide / FAQ
-- Localisation GPS avec carte interactive (Leaflet.js)
+### P2 — Itération suivante
+- [ ] Génération de données mock réalistes pour Analytics et Admin
+  - Script de seed MongoDB avec données capteurs historiques (30 jours)
+  - Données réalistes pour démonstration
 
-### P2 (futur)
-- Export PDF des rapports
-- Application mobile (React Native ou PWA)
-- Intégration API météo externe
-- Multi-utilisateurs par exploitation (invitations)
-- Tableau de bord de comparaison entre parcelles
-- Historique des prédictions avec comparaison prévu vs réel
-- Seuils d'alerte personnalisables par utilisateur
-- Support multilingue (EN + FR)
+### P3 — Backlog futur
+- [ ] Module IoT temps réel (WebSocket pour données live)
+- [ ] Export rapports PDF/CSV
+- [ ] Alertes push/email (SendGrid ou autre)
+- [ ] Géolocalisation des parcelles (carte interactive)
+- [ ] Intégration météo (API externe)
 
-## Variables d'environnement clés
-- MONGO_URL, DB_NAME (MongoDB)
-- JWT_SECRET, ADMIN_EMAIL, ADMIN_PASSWORD
-- FRONTEND_URL, CORS_ORIGINS
+---
+
+## Endpoints API clés
+
+| Méthode | Route | Auth |
+|---------|-------|------|
+| POST | /api/auth/register | Non |
+| POST | /api/auth/login | Non |
+| GET | /api/auth/me | Bearer |
+| POST | /api/auth/refresh | Cookie refresh |
+| GET/POST | /api/farms | Bearer |
+| GET/POST | /api/plots | Bearer |
+| GET/POST | /api/devices | Bearer |
+| POST | /api/readings | Bearer |
+| GET | /api/predictions | Bearer |
+| POST | /api/predictions/generate/{plot_id} | Bearer |
+| GET | /api/alerts | Bearer |
+| GET | /api/dashboard/stats | Bearer |
+| GET | /api/admin/stats | Bearer (admin) |
+| GET | /api/admin/users | Bearer (admin) |
+
+---
+
+## Schéma DB principal
+
+- `users`: _id, first_name, last_name, email, role, status, onboarding_completed, password_hash
+- `farms`: _id, name, location, total_area, owner_id
+- `plots`: _id, farm_id, owner_id, name, crop_type, area
+- `devices`: _id, farm_id, plot_id, owner_id, device_uid, device_type, status, battery_level
+- `sensor_readings`: _id, device_id, plot_id, owner_id, soil_moisture, air_temperature, ph, ...
+- `alerts`: _id, owner_id, device_id, type, severity, is_resolved
+- `predictions`: _id, plot_id, owner_id, target_variable, predicted_value, risk_level
+- `audit_logs`: _id, user_id, action, resource_type
+
+---
+
+## Tests
+
+- Iteration 1: Backend 100% (19/19), Frontend 95%
+- Iteration 2: Backend 100% (19/19), Frontend 100% (7/7 flows)
+- Fichiers: /app/test_reports/iteration_1.json, /app/test_reports/iteration_2.json
