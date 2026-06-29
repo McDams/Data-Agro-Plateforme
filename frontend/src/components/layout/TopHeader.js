@@ -67,7 +67,7 @@ export default function TopHeader() {
       {/* Right actions */}
       <div className="flex items-center gap-2">
         {/* Theme toggle */}
-        <Button variant="ghost" size="icon" onClick={toggle} title="Changer le thème" className="h-9 w-9">
+        <Button variant="ghost" size="icon" onClick={toggle} title="Changer le thème" className="h-9 w-9" data-testid="dark-mode-toggle">
           {theme === "light" ? <Moon size={18} /> : <Sun size={18} />}
         </Button>
 
