@@ -202,8 +202,9 @@ async def startup():
     elif not verify_password(admin_pwd, existing.get("password_hash", "")):
         await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_pwd), "updated_at": now}})
 
-    Path("/app/memory").mkdir(exist_ok=True)
-    Path("/app/memory/test_credentials.md").write_text(
+    memory_dir = Path(__file__).resolve().parent / "memory"
+    memory_dir.mkdir(exist_ok=True)
+    (memory_dir / "test_credentials.md").write_text(
         f"# Credentials de test Dat'Agro\n\n"
         f"## Admin\n- Email: {admin_email}\n- Mot de passe: {admin_pwd}\n- Rôle: admin\n\n"
         f"## Endpoints Auth\n- POST /api/auth/register\n- POST /api/auth/login\n"
