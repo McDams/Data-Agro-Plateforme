@@ -1,5 +1,3 @@
-export const HOME = { emergentLink: "emergent-link" };
-
 export const AUTH = {
   loginForm: "login-form",
   loginEmail: "login-email-input",

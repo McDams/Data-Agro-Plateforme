@@ -15,8 +15,9 @@
 7. [Schéma de base de données](#schéma-de-base-de-données)
 8. [Flux d'authentification](#flux-dauthentification)
 9. [Rôles et accès](#rôles-et-accès)
-10. [Structure du projet](#structure-du-projet)
-11. [Comptes de test](#comptes-de-test)
+10. [Intégration matérielle (ESP32 + LoRa + Raspberry Pi 4)](#intégration-matérielle-esp32--lora--raspberry-pi-4)
+11. [Structure du projet](#structure-du-projet)
+12. [Comptes de test](#comptes-de-test)
 
 ---
 
@@ -107,8 +108,8 @@
 ### 1. Cloner le dépôt
 
 ```bash
-git clone <url-du-repo>
-cd datagro
+git clone https://github.com/McDams/Data-Agro-Plateforme.git
+cd Data-Agro-Plateforme
 ```
 
 ### 2. Backend (FastAPI)
@@ -217,6 +218,7 @@ WDS_SOCKET_PORT=3000
 | `GET` | `/api/farms/{id}` | Détail exploitation |
 | `PUT` | `/api/farms/{id}` | Modifier exploitation |
 | `DELETE` | `/api/farms/{id}` | Supprimer exploitation |
+| `POST` | `/api/farms/{id}/gateway-key` | Générer/régénérer la clé de passerelle IoT (retournée en clair une seule fois) |
 
 ### Parcelles
 
@@ -241,7 +243,8 @@ WDS_SOCKET_PORT=3000
 | Méthode | Endpoint | Description |
 |---------|----------|-------------|
 | `GET` | `/api/readings` | Relevés capteurs (`?device_id=&plot_id=&hours=48`) |
-| `POST` | `/api/readings` | Injecter un relevé capteur |
+| `POST` | `/api/readings` | Injecter un relevé capteur (auth utilisateur, usage manuel/frontend) |
+| `POST` | `/api/ingest/batch` | Injecter un lot de relevés depuis une passerelle matérielle (auth `X-Gateway-Key`, voir [Intégration matérielle](#intégration-matérielle-esp32--lora--raspberry-pi-4)) |
 | `GET` | `/api/predictions` | Prédictions IA |
 | `POST` | `/api/predictions/generate/{plot_id}` | Générer prédictions |
 
@@ -429,16 +432,94 @@ Token expire → POST /api/auth/refresh → nouveau token → retry automatique
 
 ---
 
+## Intégration matérielle (ESP32 + LoRa + Raspberry Pi 4)
+
+Dat'Agro est conçu pour recevoir des relevés d'un réseau de capteurs réel :
+
+```
+┌──────────────┐  LoRa   ┌──────────────┐  LoRa   ┌───────────────────┐
+│ Nœud ESP32 #1│ ──────▶ │              │         │                    │
+│ NPK/pH/humid.│         │  Raspberry   │ ◀────── │  Nœud ESP32 #2...  │
+│ sol/temp/lux │         │  Pi 4        │         │                    │
+└──────────────┘         │  (+module    │         └───────────────────┘
+                          │   LoRa)      │
+                          └──────┬───────┘
+                                 │ HTTPS (X-Gateway-Key)
+                                 ▼
+                     POST /api/ingest/batch
+                                 │
+                                 ▼
+                          Dat'Agro API → MongoDB → Dashboard / Alertes / Prédictions IA
+```
+
+Le Raspberry Pi 4 est le **seul point du réseau connecté à Internet** : chaque nœud ESP32
+envoie ses relevés au Pi en LoRa, qui les agrège puis les transmet par lot à l'API.
+
+### 1. Enregistrer chaque nœud ESP32 comme appareil
+
+Avant qu'un nœud puisse envoyer des données, il doit être enregistré via l'interface
+(**Appareils → Nouvel appareil**), rattaché à une exploitation (et optionnellement une parcelle),
+avec un `device_uid` unique (ex: `esp32-parcelle3-01`) qui doit correspondre exactement à
+l'identifiant envoyé par le nœud en LoRa. Un `device_uid` inconnu est rejeté par l'API.
+
+### 2. Générer une clé de passerelle pour l'exploitation
+
+Depuis **Exploitations → [votre exploitation] → Passerelle IoT → Générer une clé**, récupérez
+la clé affichée (**une seule fois**, format `gw_...`) et configurez-la sur le Raspberry Pi
+(variable d'environnement `GATEWAY_KEY`, jamais commitée dans un dépôt).
+
+### 3. Envoyer les relevés depuis le Pi4
+
+```bash
+curl -X POST https://votre-domaine/api/ingest/batch \
+  -H "X-Gateway-Key: gw_xxxxxxxxxxxxxxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "readings": [
+      {
+        "device_uid": "esp32-parcelle3-01",
+        "soil_moisture": 42.3,
+        "soil_temperature": 21.5,
+        "air_temperature": 27.8,
+        "air_humidity": 55.0,
+        "luminosity": 12000,
+        "soil_nitrogen": 38.0,
+        "soil_phosphorus": 22.0,
+        "soil_potassium": 180.0,
+        "ph": 6.4,
+        "conductivity": 1.2
+      }
+    ]
+  }'
+```
+
+Seul `device_uid` est obligatoire ; n'incluez que les capteurs réellement présents sur le nœud.
+La réponse indique le nombre de relevés acceptés et, pour chaque `device_uid` rejeté, la raison
+(ex: appareil non enregistré pour cette exploitation) :
+
+```json
+{ "accepted": 1, "rejected": [] }
+```
+
+Un gabarit Python prêt à brancher sur votre code de réception LoRa est fourni dans
+[`hardware/raspberry_gateway_example.py`](hardware/raspberry_gateway_example.py).
+
+> **Prédictions IA** : `_compute_predictions` dans `backend/server.py` est aujourd'hui un moteur
+> de règles/seuils simple, pas un modèle entraîné. Une fois ce pipeline en production et des
+> données réelles accumulées, cette fonction est le point d'entrée à remplacer par un vrai modèle.
+
+---
+
 ## Structure du projet
 
 ```
-/app
+Data-Agro-Plateforme/
 ├── backend/
 │   ├── server.py              # Application FastAPI, routes, connexion DB
 │   ├── requirements.txt       # Dépendances Python
-│   ├── .env                   # Variables d'environnement
+│   ├── .env.example           # Gabarit des variables d'environnement
 │   └── tests/
-│       └── test_agriflow.py   # Tests pytest E2E backend
+│       └── test_datagro.py    # Tests pytest E2E backend
 │
 ├── frontend/
 │   └── src/
@@ -459,9 +540,8 @@ Token expire → POST /api/auth/refresh → nouveau token → retry automatique
 │       ├── App.js             # Routes React Router v6
 │       └── index.css          # Variables CSS Tailwind
 │
-├── memory/
-│   ├── PRD.md
-│   └── test_credentials.md
+├── hardware/
+│   └── raspberry_gateway_example.py  # Gabarit de passerelle LoRa → API
 │
 └── README.md
 ```
@@ -472,7 +552,7 @@ Token expire → POST /api/auth/refresh → nouveau token → retry automatique
 
 | Rôle | Email | Mot de passe |
 |------|-------|-------------|
-| Admin | `admin@agriflow.com` | `AgriFlow2024!` |
+| Admin | `admin@datagro.com` | `DatAgro2024!` |
 | Agriculteur | Créer via `/inscription` | — |
 
 > Le compte admin est créé automatiquement au démarrage du serveur.

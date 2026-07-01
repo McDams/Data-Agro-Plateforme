@@ -1,12 +1,12 @@
-"""AgriFlow full API test suite - sequential, cookie-based auth"""
+"""Dat'Agro full API test suite - sequential, cookie-based auth"""
 import pytest
 import requests
 import os
 import uuid
 
 BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
-ADMIN_EMAIL = "admin@agriflow.com"
-ADMIN_PASSWORD = "AgriFlow2024!"
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@datagro.com")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "DatAgro2024!")
 
 _SUFFIX = uuid.uuid4().hex[:6]
 TEST_EMAIL = f"testfarmer_{_SUFFIX}@test.com"
@@ -194,3 +194,64 @@ def test_farmer_cannot_access_admin(farmer_session):
     r = farmer_session.get(f"{BASE_URL}/api/admin/users")
     assert r.status_code == 403, r.text
     print("Farmer blocked from admin OK")
+
+# ─── Gateway / hardware ingestion ──────────────────────────────────────────────
+
+@pytest.fixture(scope="module")
+def gateway_key(farmer_session, farm_id):
+    r = farmer_session.post(f"{BASE_URL}/api/farms/{farm_id}/gateway-key")
+    assert r.status_code == 200, r.text
+    key = r.json()["gateway_key"]
+    assert key.startswith("gw_")
+    return key
+
+@pytest.fixture(scope="module")
+def gateway_device_uid(farmer_session, farm_id, plot_id):
+    uid = f"DEV-GW-{uuid.uuid4().hex[:8]}"
+    r = farmer_session.post(f"{BASE_URL}/api/devices", json={
+        "farm_id": farm_id, "plot_id": plot_id,
+        "name": "TEST_GatewayNode", "device_uid": uid,
+        "device_type": "esp32_node", "sensor_types": ["soil_moisture", "ph"]
+    })
+    assert r.status_code == 200, r.text
+    return uid
+
+def test_generate_gateway_key(gateway_key):
+    assert gateway_key.startswith("gw_")
+    print("Gateway key generated OK")
+
+def test_farm_shows_gateway_configured_without_leaking_hash(farmer_session, farm_id, gateway_key):
+    r = farmer_session.get(f"{BASE_URL}/api/farms/{farm_id}")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["has_gateway_key"] is True
+    assert "gateway_key_hash" not in d
+    print("Farm exposes has_gateway_key without leaking hash OK")
+
+def test_ingest_batch_valid_key(gateway_key, gateway_device_uid):
+    r = requests.post(f"{BASE_URL}/api/ingest/batch",
+        headers={"X-Gateway-Key": gateway_key},
+        json={"readings": [{"device_uid": gateway_device_uid, "soil_moisture": 45.0, "ph": 6.5}]})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["accepted"] == 1
+    assert d["rejected"] == []
+    print("Batch ingestion accepted OK")
+
+def test_ingest_batch_invalid_key(gateway_device_uid):
+    r = requests.post(f"{BASE_URL}/api/ingest/batch",
+        headers={"X-Gateway-Key": "gw_invalidkey"},
+        json={"readings": [{"device_uid": gateway_device_uid, "soil_moisture": 45.0}]})
+    assert r.status_code == 401
+    print("Batch ingestion with invalid key rejected OK")
+
+def test_ingest_batch_unknown_device(gateway_key):
+    r = requests.post(f"{BASE_URL}/api/ingest/batch",
+        headers={"X-Gateway-Key": gateway_key},
+        json={"readings": [{"device_uid": "DEV-DOES-NOT-EXIST", "soil_moisture": 30.0}]})
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["accepted"] == 0
+    assert len(d["rejected"]) == 1
+    assert d["rejected"][0]["device_uid"] == "DEV-DOES-NOT-EXIST"
+    print("Unknown device_uid rejected in batch response OK")
