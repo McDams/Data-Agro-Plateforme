@@ -4,7 +4,7 @@ import requests
 import os
 import uuid
 
-BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "").rstrip("/")
+BASE_URL = os.environ.get("REACT_APP_BACKEND_URL", "http://localhost:8001").rstrip("/")
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "admin@datagro.com")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "DatAgro2024!")
 
