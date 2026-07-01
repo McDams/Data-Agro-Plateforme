@@ -43,7 +43,7 @@ export default function Reports() {
   const buildReport = (type) => {
     const date = new Date().toLocaleDateString("fr-FR", { dateStyle: "full" });
     let lines = [
-      "=== RAPPORT AGRIFLOW ===",
+      "=== RAPPORT DAT'AGRO ===",
       `Généré le: ${date}`,
       `Période: ${period === "7d" ? "7 derniers jours" : period === "30d" ? "30 derniers jours" : "Tout"}`,
       "",

@@ -1,10 +1,9 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-import os, secrets, logging
+import os, secrets, hashlib, logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Any, Annotated
-from pathlib import Path
 
 import bcrypt
 import jwt
@@ -51,7 +50,7 @@ def _parse_oid(v: Any) -> str:
 PyObjectId = Annotated[str, BeforeValidator(_parse_oid)]
 
 # ─── Auth helpers ─────────────────────────────────────────────────────────────
-JWT_SECRET = os.environ.get("JWT_SECRET", "fallback-datagro-secret-change-me")
+JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALG = "HS256"
 
 def hash_password(pwd: str) -> str:
@@ -100,6 +99,17 @@ async def require_admin(request: Request) -> dict:
         raise HTTPException(403, "Accès administrateur requis")
     return user
 
+async def get_farm_from_gateway_key(request: Request) -> dict:
+    """Authenticates a hardware gateway (Raspberry Pi) via the X-Gateway-Key header."""
+    key = request.headers.get("X-Gateway-Key")
+    if not key:
+        raise HTTPException(401, "Clé de passerelle manquante (header X-Gateway-Key)")
+    key_hash = hashlib.sha256(key.encode()).hexdigest()
+    farm = await db.farms.find_one({"gateway_key_hash": key_hash})
+    if not farm:
+        raise HTTPException(401, "Clé de passerelle invalide")
+    return farm
+
 # ─── Utils ────────────────────────────────────────────────────────────────────
 def doc(d: dict | None) -> dict | None:
     if d is None: return None
@@ -112,6 +122,16 @@ def doc(d: dict | None) -> dict | None:
     return r
 
 def docs(lst): return [doc(d) for d in lst]
+
+def farm_doc(f: dict | None) -> dict | None:
+    """Like doc(), but never leaks the gateway key hash — only its presence + display prefix."""
+    if f is None: return None
+    d = doc(f)
+    d.pop("gateway_key_hash", None)
+    d["has_gateway_key"] = bool(f.get("gateway_key_hash"))
+    return d
+
+def farm_docs(lst): return [farm_doc(f) for f in lst]
 
 # ─── Pydantic models ──────────────────────────────────────────────────────────
 class RegisterReq(BaseModel):
@@ -164,6 +184,17 @@ class ReadingCreate(BaseModel):
     soil_phosphorus: Optional[float] = None; soil_potassium: Optional[float] = None
     ph: Optional[float] = None; conductivity: Optional[float] = None
 
+class BatchReadingItem(BaseModel):
+    device_uid: str
+    soil_moisture: Optional[float] = None; soil_temperature: Optional[float] = None
+    air_temperature: Optional[float] = None; air_humidity: Optional[float] = None
+    luminosity: Optional[float] = None; soil_nitrogen: Optional[float] = None
+    soil_phosphorus: Optional[float] = None; soil_potassium: Optional[float] = None
+    ph: Optional[float] = None; conductivity: Optional[float] = None
+
+class BatchIngestReq(BaseModel):
+    readings: List[BatchReadingItem]
+
 class AlertUpdate(BaseModel):
     is_read: Optional[bool] = None; is_resolved: Optional[bool] = None
 
@@ -186,6 +217,8 @@ async def startup():
     await db.sensor_readings.create_index([("device_id", 1), ("timestamp", -1)])
     await db.alerts.create_index([("owner_id", 1), ("is_resolved", 1)])
     await db.predictions.create_index([("plot_id", 1), ("created_at", -1)])
+    await db.farms.create_index("gateway_key_hash", unique=True, sparse=True)
+    await db.devices.create_index("device_uid", unique=True)
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@datagro.com")
     admin_pwd = os.environ.get("ADMIN_PASSWORD", "DatAgro2024!")
@@ -201,15 +234,6 @@ async def startup():
         })
     elif not verify_password(admin_pwd, existing.get("password_hash", "")):
         await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_pwd), "updated_at": now}})
-
-    memory_dir = Path(__file__).resolve().parent / "memory"
-    memory_dir.mkdir(exist_ok=True)
-    (memory_dir / "test_credentials.md").write_text(
-        f"# Credentials de test Dat'Agro\n\n"
-        f"## Admin\n- Email: {admin_email}\n- Mot de passe: {admin_pwd}\n- Rôle: admin\n\n"
-        f"## Endpoints Auth\n- POST /api/auth/register\n- POST /api/auth/login\n"
-        f"- POST /api/auth/logout\n- GET /api/auth/me\n"
-    )
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -328,7 +352,7 @@ async def get_farms(request: Request):
     q = {} if u["role"] == "admin" else {"owner_id": u["_id"] if "_id" in u else u["id"]}
     oid = u.get("_id") or u.get("id")
     q = {} if u["role"] == "admin" else {"owner_id": oid}
-    return docs(await db.farms.find(q).to_list(200))
+    return farm_docs(await db.farms.find(q).to_list(200))
 
 @api_router.post("/farms")
 async def create_farm(data: FarmCreate, request: Request):
@@ -340,7 +364,7 @@ async def create_farm(data: FarmCreate, request: Request):
         "owner_id": uid, "created_at": now, "updated_at": now})
     farm = await db.farms.find_one({"_id": r.inserted_id})
     await _audit(uid, "create_farm", "farm", str(r.inserted_id))
-    return doc(farm)
+    return farm_doc(farm)
 
 @api_router.get("/farms/{fid}")
 async def get_farm(fid: str, request: Request):
@@ -349,7 +373,7 @@ async def get_farm(fid: str, request: Request):
     q = {"_id": ObjectId(fid)} if u["role"] == "admin" else {"_id": ObjectId(fid), "owner_id": uid}
     f = await db.farms.find_one(q)
     if not f: raise HTTPException(404, "Exploitation introuvable")
-    return doc(f)
+    return farm_doc(f)
 
 @api_router.put("/farms/{fid}")
 async def update_farm(fid: str, data: FarmUpdate, request: Request):
@@ -360,7 +384,23 @@ async def update_farm(fid: str, data: FarmUpdate, request: Request):
     upd["updated_at"] = datetime.now(timezone.utc)
     res = await db.farms.update_one(q, {"$set": upd})
     if res.matched_count == 0: raise HTTPException(404, "Exploitation introuvable")
-    return doc(await db.farms.find_one({"_id": ObjectId(fid)}))
+    return farm_doc(await db.farms.find_one({"_id": ObjectId(fid)}))
+
+@api_router.post("/farms/{fid}/gateway-key")
+async def generate_gateway_key(fid: str, request: Request):
+    u = await get_current_user(request)
+    uid = u.get("_id") or u.get("id")
+    q = {"_id": ObjectId(fid)} if u["role"] == "admin" else {"_id": ObjectId(fid), "owner_id": uid}
+    farm = await db.farms.find_one(q)
+    if not farm: raise HTTPException(404, "Exploitation introuvable")
+    raw_key = "gw_" + secrets.token_urlsafe(24)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    now = datetime.now(timezone.utc)
+    await db.farms.update_one({"_id": ObjectId(fid)}, {"$set": {
+        "gateway_key_hash": key_hash, "gateway_key_prefix": raw_key[:11], "updated_at": now}})
+    await _audit(uid, "generate_gateway_key", "farm", fid)
+    return {"gateway_key": raw_key,
+            "warning": "Cette clé ne sera plus jamais affichée en clair. Notez-la maintenant et configurez-la sur votre passerelle Raspberry Pi."}
 
 @api_router.delete("/farms/{fid}")
 async def delete_farm(fid: str, request: Request):
@@ -495,42 +535,71 @@ async def create_reading(data: ReadingCreate, request: Request):
     u = await get_current_user(request)
     uid = u.get("_id") or u.get("id")
     now = datetime.now(timezone.utc)
-    reading = {k: v for k, v in data.model_dump().items() if v is not None}
-    reading["owner_id"] = uid
+    values = {k: v for k, v in data.model_dump().items() if k not in ("device_id", "plot_id")}
+    reading = await _ingest_reading(uid, data.device_id, data.plot_id, values, now)
+    return doc(reading)
+
+async def _ingest_reading(owner_id: str, device_id: str, plot_id: Optional[str], values: dict, now: datetime) -> dict:
+    """Shared by the manual /readings endpoint (JWT) and the hardware /ingest/batch endpoint (gateway key)."""
+    reading = {k: v for k, v in values.items() if v is not None}
+    reading["device_id"] = device_id
+    reading["plot_id"] = plot_id
+    reading["owner_id"] = owner_id
     reading["timestamp"] = now
     r = await db.sensor_readings.insert_one(reading)
-    # Update device last_sync and status
-    await db.devices.update_one({"_id": ObjectId(data.device_id)},
+    await db.devices.update_one({"_id": ObjectId(device_id)},
         {"$set": {"last_sync": now, "status": "online", "signal_strength": 80, "updated_at": now}})
-    # Auto-generate alerts
-    await _check_alerts(uid, data, now)
-    return doc(await db.sensor_readings.find_one({"_id": r.inserted_id}))
+    await _check_alerts(owner_id, device_id, plot_id, reading, now)
+    return await db.sensor_readings.find_one({"_id": r.inserted_id})
 
-async def _check_alerts(uid: str, data: ReadingCreate, now: datetime):
+async def _check_alerts(uid: str, device_id: str, plot_id: Optional[str], reading: dict, now: datetime):
     async def _alert(atype: str, sev: str, title: str, msg: str):
-        existing = await db.alerts.find_one({"device_id": data.device_id, "type": atype, "is_resolved": False})
+        existing = await db.alerts.find_one({"device_id": device_id, "type": atype, "is_resolved": False})
         if not existing:
-            await db.alerts.insert_one({"owner_id": uid, "device_id": data.device_id,
-                "plot_id": data.plot_id, "type": atype, "severity": sev,
+            await db.alerts.insert_one({"owner_id": uid, "device_id": device_id,
+                "plot_id": plot_id, "type": atype, "severity": sev,
                 "title": title, "message": msg, "is_read": False, "is_resolved": False,
                 "resolved_at": None, "created_at": now})
 
-    if data.soil_moisture is not None:
-        if data.soil_moisture < 20:
+    soil_moisture = reading.get("soil_moisture")
+    if soil_moisture is not None:
+        if soil_moisture < 20:
             await _alert("low_moisture_critical", "critical", "Humidité du sol critique",
-                f"Humidité du sol à {data.soil_moisture:.1f}% — irrigation urgente requise")
-        elif data.soil_moisture < 30:
+                f"Humidité du sol à {soil_moisture:.1f}% — irrigation urgente requise")
+        elif soil_moisture < 30:
             await _alert("low_moisture_warning", "warning", "Humidité du sol faible",
-                f"Humidité du sol à {data.soil_moisture:.1f}% — irrigation recommandée sous 48h")
-    if data.air_temperature is not None and data.air_temperature > 38:
+                f"Humidité du sol à {soil_moisture:.1f}% — irrigation recommandée sous 48h")
+    air_temperature = reading.get("air_temperature")
+    if air_temperature is not None and air_temperature > 38:
         await _alert("high_temp", "warning", "Température élevée",
-            f"Température de l'air à {data.air_temperature:.1f}°C — risque de stress thermique")
-    if data.soil_nitrogen is not None and data.soil_nitrogen < 20:
+            f"Température de l'air à {air_temperature:.1f}°C — risque de stress thermique")
+    soil_nitrogen = reading.get("soil_nitrogen")
+    if soil_nitrogen is not None and soil_nitrogen < 20:
         await _alert("low_nitrogen", "warning", "Azote du sol insuffisant",
-            f"Teneur en azote à {data.soil_nitrogen:.1f} mg/kg — apport en engrais recommandé")
-    if data.ph is not None and (data.ph < 5.5 or data.ph > 8.0):
+            f"Teneur en azote à {soil_nitrogen:.1f} mg/kg — apport en engrais recommandé")
+    ph = reading.get("ph")
+    if ph is not None and (ph < 5.5 or ph > 8.0):
         await _alert("ph_imbalance", "warning", "pH du sol déséquilibré",
-            f"pH à {data.ph:.1f} — en dehors de la plage optimale (5.5–8.0)")
+            f"pH à {ph:.1f} — en dehors de la plage optimale (5.5–8.0)")
+
+# ─── HARDWARE INGESTION (passerelle Raspberry Pi / ESP32-LoRa) ────────────────
+@api_router.post("/ingest/batch")
+async def ingest_batch(data: BatchIngestReq, request: Request):
+    farm = await get_farm_from_gateway_key(request)
+    farm_id = str(farm["_id"])
+    now = datetime.now(timezone.utc)
+    accepted = 0
+    rejected = []
+    for item in data.readings:
+        device = await db.devices.find_one({"device_uid": item.device_uid, "farm_id": farm_id})
+        if not device:
+            rejected.append({"device_uid": item.device_uid,
+                              "reason": "Appareil non enregistré pour cette exploitation"})
+            continue
+        values = item.model_dump(exclude={"device_uid"})
+        await _ingest_reading(device["owner_id"], str(device["_id"]), device.get("plot_id"), values, now)
+        accepted += 1
+    return {"accepted": accepted, "rejected": rejected}
 
 # ─── ALERTS ───────────────────────────────────────────────────────────────────
 @api_router.get("/alerts")
@@ -834,7 +903,7 @@ async def admin_farms(request: Request):
     farms = await db.farms.find({}).to_list(1000)
     result = []
     for f in farms:
-        fd = doc(f)
+        fd = farm_doc(f)
         user = await db.users.find_one({"_id": ObjectId(f["owner_id"])}, {"first_name": 1, "last_name": 1, "email": 1})
         fd["owner_name"] = f"{user['first_name']} {user['last_name']}" if user else "Inconnu"
         fd["owner_email"] = user.get("email", "") if user else ""

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import api, { formatError } from "@/utils/api";
-import { Plus, Pencil, Trash2, MapPin, Wheat, ArrowRight } from "lucide-react";
+import { Plus, Pencil, Trash2, MapPin, Wheat, ArrowRight, Radio, Copy, Check, RefreshCw } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +11,81 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { toast } from "sonner";
 import { FARMS } from "@/constants/testIds";
+
+function GatewayKeyDialog({ farm, open, onOpenChange, onKeyGenerated }) {
+  const [loading, setLoading] = useState(false);
+  const [newKey, setNewKey] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => { if (!open) { setNewKey(null); setCopied(false); } }, [open]);
+
+  const generate = async () => {
+    setLoading(true);
+    try {
+      const { data } = await api.post(`/farms/${farm.id}/gateway-key`);
+      setNewKey(data.gateway_key);
+      onKeyGenerated(farm.id, { has_gateway_key: true, gateway_key_prefix: data.gateway_key.slice(0, 11) });
+    } catch (err) { toast.error(formatError(err.response?.data?.detail)); }
+    finally { setLoading(false); }
+  };
+
+  const copy = async () => {
+    await navigator.clipboard.writeText(newKey);
+    setCopied(true);
+    toast.success("Clé copiée");
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle style={{ fontFamily: "Outfit, sans-serif" }}>Passerelle IoT — {farm?.name}</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Cette clé authentifie votre passerelle Raspberry Pi (nœuds ESP32 + LoRa) auprès de l'API
+            pour l'envoi périodique des relevés capteurs (<code>POST /api/ingest/batch</code>,
+            en-tête <code>X-Gateway-Key</code>).
+          </p>
+
+          {newKey ? (
+            <>
+              <Alert>
+                <AlertDescription className="text-xs">
+                  Notez cette clé maintenant : elle ne sera <strong>plus jamais affichée</strong> en clair.
+                  Configurez-la sur votre Raspberry Pi (ex: variable d'environnement <code>GATEWAY_KEY</code>).
+                </AlertDescription>
+              </Alert>
+              <div className="flex items-center gap-2">
+                <Input readOnly value={newKey} className="font-mono text-xs" />
+                <Button type="button" size="icon" variant="outline" onClick={copy}>
+                  {copied ? <Check size={14} /> : <Copy size={14} />}
+                </Button>
+              </div>
+            </>
+          ) : farm?.has_gateway_key ? (
+            <div className="flex items-center justify-between rounded-md border border-border p-3">
+              <div className="flex items-center gap-2 text-sm">
+                <Radio size={14} className="text-green-600" />
+                Configurée — <code className="text-xs">{farm.gateway_key_prefix}…</code>
+              </div>
+              <Button type="button" size="sm" variant="outline" className="gap-1.5" onClick={generate} disabled={loading}>
+                <RefreshCw size={13} /> Régénérer
+              </Button>
+            </div>
+          ) : (
+            <div className="rounded-md border border-dashed border-border p-4 text-center">
+              <p className="text-sm text-muted-foreground mb-3">Aucune clé configurée pour cette exploitation.</p>
+              <Button type="button" size="sm" className="gap-2" onClick={generate} disabled={loading}>
+                <Radio size={14} /> {loading ? "Génération..." : "Générer une clé de passerelle"}
+              </Button>
+            </div>
+          )}
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 function FarmForm({ initial, onSave, onCancel }) {
   const [form, setForm] = useState(initial || { name: "", location: "", description: "", total_area: "" });
@@ -73,6 +148,7 @@ export default function Farms() {
   const [showCreate, setShowCreate] = useState(false);
   const [editFarm, setEditFarm] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const [gatewayFarm, setGatewayFarm] = useState(null);
 
   const load = () => {
     setLoading(true);
@@ -89,6 +165,11 @@ export default function Farms() {
     });
     setShowCreate(false); setEditFarm(null);
     toast.success(farm.id && editFarm ? "Exploitation mise à jour" : "Exploitation créée");
+  };
+
+  const handleGatewayKeyGenerated = (farmId, patch) => {
+    setFarms((prev) => prev.map(f => f.id === farmId ? { ...f, ...patch } : f));
+    setGatewayFarm((prev) => prev && prev.id === farmId ? { ...prev, ...patch } : prev);
   };
 
   const handleDelete = async (id) => {
@@ -177,6 +258,11 @@ export default function Farms() {
                   <p className="text-xs text-muted-foreground">
                     Créée le {new Date(farm.created_at).toLocaleDateString("fr-FR")}
                   </p>
+                  <Button variant="ghost" size="sm" className="h-7 gap-1.5 text-xs"
+                    onClick={() => setGatewayFarm(farm)} data-testid="farm-gateway-button">
+                    <Radio size={12} className={farm.has_gateway_key ? "text-green-600" : ""} />
+                    Passerelle IoT
+                  </Button>
                 </div>
               </CardContent>
             </Card>
@@ -203,6 +289,10 @@ export default function Farms() {
           {editFarm && <FarmForm initial={editFarm} onSave={handleSave} onCancel={() => setEditFarm(null)} />}
         </DialogContent>
       </Dialog>
+
+      {/* Gateway Key Dialog */}
+      <GatewayKeyDialog farm={gatewayFarm} open={!!gatewayFarm}
+        onOpenChange={(o) => !o && setGatewayFarm(null)} onKeyGenerated={handleGatewayKeyGenerated} />
     </div>
   );
 }
