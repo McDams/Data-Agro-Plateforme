@@ -3,25 +3,19 @@ load_dotenv()
 
 import os, secrets, hashlib, logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Any, Annotated
+from typing import Optional, List
 
 import bcrypt
 import jwt
-from bson import ObjectId
-from fastapi import FastAPI, APIRouter, HTTPException, Request, Response, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Request, Response
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
+from pydantic import BaseModel
+
+from db import init_pool, close_pool, get_pool, pg_doc as doc, pg_docs as docs, pg_update
 
 # ─── App ──────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Dat'Agro API", version="1.0.0")
 api_router = APIRouter(prefix="/api")
-
-# ─── MongoDB ──────────────────────────────────────────────────────────────────
-MONGO_URL = os.environ["MONGO_URL"]
-DB_NAME = os.environ["DB_NAME"]
-client = AsyncIOMotorClient(MONGO_URL)
-db = client[DB_NAME]
 
 # ─── CORS ─────────────────────────────────────────────────────────────────────
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
@@ -40,14 +34,6 @@ app.add_middleware(
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ─── ObjectId helper ──────────────────────────────────────────────────────────
-def _parse_oid(v: Any) -> str:
-    if isinstance(v, ObjectId): return str(v)
-    if isinstance(v, str): return v
-    raise ValueError(f"Invalid ObjectId: {v}")
-
-PyObjectId = Annotated[str, BeforeValidator(_parse_oid)]
 
 # ─── Auth helpers ─────────────────────────────────────────────────────────────
 JWT_SECRET = os.environ["JWT_SECRET"]
@@ -82,12 +68,12 @@ async def get_current_user(request: Request) -> dict:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
         if payload.get("type") != "access":
             raise HTTPException(401, "Token invalide")
-        user = await db.users.find_one({"_id": ObjectId(payload["sub"])})
+        user = await get_pool().fetchrow("SELECT * FROM users WHERE id = $1", payload["sub"])
         if not user:
             raise HTTPException(401, "Utilisateur introuvable")
-        user["_id"] = str(user["_id"])
-        user.pop("password_hash", None)
-        return user
+        d = doc(user)
+        d.pop("password_hash", None)
+        return d
     except jwt.ExpiredSignatureError:
         raise HTTPException(401, "Token expiré")
     except jwt.InvalidTokenError:
@@ -105,25 +91,13 @@ async def get_farm_from_gateway_key(request: Request) -> dict:
     if not key:
         raise HTTPException(401, "Clé de passerelle manquante (header X-Gateway-Key)")
     key_hash = hashlib.sha256(key.encode()).hexdigest()
-    farm = await db.farms.find_one({"gateway_key_hash": key_hash})
+    farm = await get_pool().fetchrow("SELECT * FROM farms WHERE gateway_key_hash = $1", key_hash)
     if not farm:
         raise HTTPException(401, "Clé de passerelle invalide")
     return farm
 
 # ─── Utils ────────────────────────────────────────────────────────────────────
-def doc(d: dict | None) -> dict | None:
-    if d is None: return None
-    r = {}
-    for k, v in d.items():
-        if k == "_id": r["id"] = str(v)
-        elif isinstance(v, ObjectId): r[k] = str(v)
-        elif isinstance(v, datetime): r[k] = v.isoformat()
-        else: r[k] = v
-    return r
-
-def docs(lst): return [doc(d) for d in lst]
-
-def farm_doc(f: dict | None) -> dict | None:
+def farm_doc(f) -> dict | None:
     """Like doc(), but never leaks the gateway key hash — only its presence + display prefix."""
     if f is None: return None
     d = doc(f)
@@ -211,49 +185,41 @@ class UserStatusUpdate(BaseModel):
 # ─── Startup ──────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
-    await db.users.create_index("email", unique=True)
-    await db.password_reset_tokens.create_index("expires_at", expireAfterSeconds=0)
-    await db.login_attempts.create_index("identifier")
-    await db.sensor_readings.create_index([("device_id", 1), ("timestamp", -1)])
-    await db.alerts.create_index([("owner_id", 1), ("is_resolved", 1)])
-    await db.predictions.create_index([("plot_id", 1), ("created_at", -1)])
-    await db.farms.create_index("gateway_key_hash", unique=True, sparse=True)
-    await db.devices.create_index("device_uid", unique=True)
+    await init_pool()
+    pool = get_pool()
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@datagro.com")
     admin_pwd = os.environ.get("ADMIN_PASSWORD", "DatAgro2024!")
-    now = datetime.now(timezone.utc)
-    existing = await db.users.find_one({"email": admin_email})
+    existing = await pool.fetchrow("SELECT * FROM users WHERE email = $1", admin_email)
     if existing is None:
-        await db.users.insert_one({
-            "first_name": "Admin", "last_name": "Dat'Agro", "email": admin_email,
-            "phone": "+33 1 00 00 00 00", "farm_name": "Dat'Agro Platform", "country": "France",
-            "role": "admin", "status": "active",
-            "password_hash": hash_password(admin_pwd), "onboarding_completed": True,
-            "created_at": now, "updated_at": now
-        })
-    elif not verify_password(admin_pwd, existing.get("password_hash", "")):
-        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_pwd), "updated_at": now}})
+        await pool.execute("""
+            INSERT INTO users (first_name, last_name, email, phone, farm_name, country,
+                                role, status, password_hash, onboarding_completed)
+            VALUES ($1,$2,$3,$4,$5,$6,'admin','active',$7,TRUE)""",
+            "Admin", "Dat'Agro", admin_email, "+33 1 00 00 00 00", "Dat'Agro Platform", "France",
+            hash_password(admin_pwd))
+    elif not verify_password(admin_pwd, existing["password_hash"]):
+        await pool.execute("UPDATE users SET password_hash = $1, updated_at = now() WHERE email = $2",
+                            hash_password(admin_pwd), admin_email)
 
 @app.on_event("shutdown")
 async def shutdown():
-    client.close()
+    await close_pool()
 
 # ─── AUTH ─────────────────────────────────────────────────────────────────────
 @api_router.post("/auth/register")
 async def register(data: RegisterReq, response: Response):
     email = data.email.lower().strip()
-    if await db.users.find_one({"email": email}):
+    pool = get_pool()
+    if await pool.fetchrow("SELECT id FROM users WHERE email = $1", email):
         raise HTTPException(400, "Cet email est déjà utilisé")
-    now = datetime.now(timezone.utc)
-    result = await db.users.insert_one({
-        "first_name": data.first_name, "last_name": data.last_name, "email": email,
-        "phone": data.phone, "farm_name": data.farm_name, "country": data.country,
-        "role": "farmer", "status": "active",
-        "password_hash": hash_password(data.password), "onboarding_completed": False,
-        "created_at": now, "updated_at": now
-    })
-    uid = str(result.inserted_id)
+    row = await pool.fetchrow("""
+        INSERT INTO users (first_name, last_name, email, phone, farm_name, country,
+                            role, status, password_hash, onboarding_completed)
+        VALUES ($1,$2,$3,$4,$5,$6,'farmer','active',$7,FALSE) RETURNING id""",
+        data.first_name, data.last_name, email, data.phone, data.farm_name, data.country,
+        hash_password(data.password))
+    uid = str(row["id"])
     at = create_access_token(uid, email)
     rt = create_refresh_token(uid)
     set_cookies(response, at, rt)
@@ -267,28 +233,30 @@ async def login(data: LoginReq, request: Request, response: Response):
     email = data.email.lower().strip()
     ip = request.client.host if request.client else "unknown"
     key = f"{ip}:{email}"
-    att = await db.login_attempts.find_one({"identifier": key})
-    if att and att.get("count", 0) >= 5:
+    pool = get_pool()
+    att = await pool.fetchrow("SELECT * FROM login_attempts WHERE identifier = $1", key)
+    if att and att["count"] >= 5:
         if (datetime.now(timezone.utc) - att["last_attempt"]).total_seconds() < 900:
             raise HTTPException(429, "Trop de tentatives. Réessayez dans 15 minutes.")
-        await db.login_attempts.delete_one({"identifier": key})
+        await pool.execute("DELETE FROM login_attempts WHERE identifier = $1", key)
 
-    user = await db.users.find_one({"email": email})
-    if not user or not verify_password(data.password, user.get("password_hash", "")):
-        await db.login_attempts.update_one({"identifier": key},
-            {"$inc": {"count": 1}, "$set": {"last_attempt": datetime.now(timezone.utc)}}, upsert=True)
+    user = await pool.fetchrow("SELECT * FROM users WHERE email = $1", email)
+    if not user or not verify_password(data.password, user["password_hash"]):
+        await pool.execute("""
+            INSERT INTO login_attempts (identifier, count, last_attempt) VALUES ($1,1,now())
+            ON CONFLICT (identifier) DO UPDATE SET count = login_attempts.count + 1, last_attempt = now()""", key)
         raise HTTPException(401, "Email ou mot de passe incorrect")
-    if user.get("status") == "suspended":
+    if user["status"] == "suspended":
         raise HTTPException(403, "Compte suspendu. Contactez l'administrateur.")
-    await db.login_attempts.delete_one({"identifier": key})
-    uid = str(user["_id"])
+    await pool.execute("DELETE FROM login_attempts WHERE identifier = $1", key)
+    uid = str(user["id"])
     at = create_access_token(uid, email)
     rt = create_refresh_token(uid)
     set_cookies(response, at, rt)
-    return {"id": uid, "first_name": user.get("first_name"), "last_name": user.get("last_name"),
-            "email": user["email"], "role": user.get("role", "farmer"),
-            "status": user.get("status"), "onboarding_completed": user.get("onboarding_completed", False),
-            "farm_name": user.get("farm_name"), "phone": user.get("phone"), "country": user.get("country"),
+    return {"id": uid, "first_name": user["first_name"], "last_name": user["last_name"],
+            "email": user["email"], "role": user["role"],
+            "status": user["status"], "onboarding_completed": user["onboarding_completed"],
+            "farm_name": user["farm_name"], "phone": user["phone"], "country": user["country"],
             "access_token": at, "refresh_token": rt}
 
 @api_router.post("/auth/logout")
@@ -313,7 +281,7 @@ async def refresh(request: Request, response: Response):
     try:
         p = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALG])
         if p.get("type") != "refresh": raise HTTPException(401, "Token invalide")
-        user = await db.users.find_one({"_id": ObjectId(p["sub"])})
+        user = await get_pool().fetchrow("SELECT * FROM users WHERE id = $1", p["sub"])
         if not user: raise HTTPException(401, "Utilisateur introuvable")
         at = create_access_token(p["sub"], user["email"])
         response.set_cookie("access_token", at,
@@ -325,196 +293,244 @@ async def refresh(request: Request, response: Response):
 @api_router.post("/auth/forgot-password")
 async def forgot_password(data: ForgotPwdReq):
     email = data.email.lower().strip()
-    user = await db.users.find_one({"email": email})
+    pool = get_pool()
+    user = await pool.fetchrow("SELECT id FROM users WHERE email = $1", email)
     if user:
         token = secrets.token_urlsafe(32)
-        await db.password_reset_tokens.insert_one({
-            "token": token, "user_id": str(user["_id"]), "email": email,
-            "expires_at": datetime.now(timezone.utc) + timedelta(hours=1), "used": False
-        })
+        await pool.execute("""
+            INSERT INTO password_reset_tokens (token, user_id, email, expires_at, used)
+            VALUES ($1,$2,$3,$4,FALSE)""",
+            token, user["id"], email, datetime.now(timezone.utc) + timedelta(hours=1))
         logger.info(f"[RESET] /reinitialiser-mot-de-passe?token={token}")
     return {"message": "Si l'email existe, un lien de réinitialisation vous a été envoyé"}
 
 @api_router.post("/auth/reset-password")
 async def reset_password(data: ResetPwdReq):
-    t = await db.password_reset_tokens.find_one({"token": data.token, "used": False})
+    pool = get_pool()
+    t = await pool.fetchrow("SELECT * FROM password_reset_tokens WHERE token = $1 AND used = FALSE", data.token)
     if not t or t["expires_at"] < datetime.now(timezone.utc):
         raise HTTPException(400, "Token invalide ou expiré")
-    await db.users.update_one({"_id": ObjectId(t["user_id"])},
-        {"$set": {"password_hash": hash_password(data.new_password), "updated_at": datetime.now(timezone.utc)}})
-    await db.password_reset_tokens.update_one({"token": data.token}, {"$set": {"used": True}})
+    await pool.execute("UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2",
+        hash_password(data.new_password), t["user_id"])
+    await pool.execute("UPDATE password_reset_tokens SET used = TRUE WHERE token = $1", data.token)
     return {"message": "Mot de passe réinitialisé"}
 
 # ─── FARMS ────────────────────────────────────────────────────────────────────
 @api_router.get("/farms")
 async def get_farms(request: Request):
     u = await get_current_user(request)
-    q = {} if u["role"] == "admin" else {"owner_id": u["_id"] if "_id" in u else u["id"]}
-    oid = u.get("_id") or u.get("id")
-    q = {} if u["role"] == "admin" else {"owner_id": oid}
-    return farm_docs(await db.farms.find(q).to_list(200))
+    pool = get_pool()
+    if u["role"] == "admin":
+        rows = await pool.fetch("SELECT * FROM farms ORDER BY created_at DESC LIMIT 200")
+    else:
+        rows = await pool.fetch("SELECT * FROM farms WHERE owner_id = $1 ORDER BY created_at DESC LIMIT 200", u["id"])
+    return farm_docs(rows)
 
 @api_router.post("/farms")
 async def create_farm(data: FarmCreate, request: Request):
     u = await get_current_user(request)
-    now = datetime.now(timezone.utc)
-    uid = u.get("_id") or u.get("id")
-    r = await db.farms.insert_one({"name": data.name, "location": data.location,
-        "description": data.description, "total_area": data.total_area,
-        "owner_id": uid, "created_at": now, "updated_at": now})
-    farm = await db.farms.find_one({"_id": r.inserted_id})
-    await _audit(uid, "create_farm", "farm", str(r.inserted_id))
-    return farm_doc(farm)
+    uid = u["id"]
+    row = await get_pool().fetchrow("""
+        INSERT INTO farms (name, location, description, total_area, owner_id)
+        VALUES ($1,$2,$3,$4,$5) RETURNING *""",
+        data.name, data.location, data.description, data.total_area, uid)
+    await _audit(uid, "create_farm", "farm", str(row["id"]))
+    return farm_doc(row)
 
 @api_router.get("/farms/{fid}")
 async def get_farm(fid: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"_id": ObjectId(fid)} if u["role"] == "admin" else {"_id": ObjectId(fid), "owner_id": uid}
-    f = await db.farms.find_one(q)
+    pool = get_pool()
+    if u["role"] == "admin":
+        f = await pool.fetchrow("SELECT * FROM farms WHERE id = $1", fid)
+    else:
+        f = await pool.fetchrow("SELECT * FROM farms WHERE id = $1 AND owner_id = $2", fid, u["id"])
     if not f: raise HTTPException(404, "Exploitation introuvable")
     return farm_doc(f)
 
 @api_router.put("/farms/{fid}")
 async def update_farm(fid: str, data: FarmUpdate, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"_id": ObjectId(fid)} if u["role"] == "admin" else {"_id": ObjectId(fid), "owner_id": uid}
-    upd = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
-    upd["updated_at"] = datetime.now(timezone.utc)
-    res = await db.farms.update_one(q, {"$set": upd})
-    if res.matched_count == 0: raise HTTPException(404, "Exploitation introuvable")
-    return farm_doc(await db.farms.find_one({"_id": ObjectId(fid)}))
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        if u["role"] == "admin":
+            f = await conn.fetchrow("SELECT id FROM farms WHERE id = $1", fid)
+        else:
+            f = await conn.fetchrow("SELECT id FROM farms WHERE id = $1 AND owner_id = $2", fid, u["id"])
+        if not f: raise HTTPException(404, "Exploitation introuvable")
+        await pg_update(conn, "farms", fid, data.model_dump(exclude_unset=True))
+        updated = await conn.fetchrow("SELECT * FROM farms WHERE id = $1", fid)
+    return farm_doc(updated)
 
 @api_router.post("/farms/{fid}/gateway-key")
 async def generate_gateway_key(fid: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"_id": ObjectId(fid)} if u["role"] == "admin" else {"_id": ObjectId(fid), "owner_id": uid}
-    farm = await db.farms.find_one(q)
+    pool = get_pool()
+    if u["role"] == "admin":
+        farm = await pool.fetchrow("SELECT id FROM farms WHERE id = $1", fid)
+    else:
+        farm = await pool.fetchrow("SELECT id FROM farms WHERE id = $1 AND owner_id = $2", fid, u["id"])
     if not farm: raise HTTPException(404, "Exploitation introuvable")
     raw_key = "gw_" + secrets.token_urlsafe(24)
     key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-    now = datetime.now(timezone.utc)
-    await db.farms.update_one({"_id": ObjectId(fid)}, {"$set": {
-        "gateway_key_hash": key_hash, "gateway_key_prefix": raw_key[:11], "updated_at": now}})
-    await _audit(uid, "generate_gateway_key", "farm", fid)
+    await pool.execute("""
+        UPDATE farms SET gateway_key_hash = $1, gateway_key_prefix = $2, updated_at = now() WHERE id = $3""",
+        key_hash, raw_key[:11], fid)
+    await _audit(u["id"], "generate_gateway_key", "farm", fid)
     return {"gateway_key": raw_key,
             "warning": "Cette clé ne sera plus jamais affichée en clair. Notez-la maintenant et configurez-la sur votre passerelle Raspberry Pi."}
 
 @api_router.delete("/farms/{fid}")
 async def delete_farm(fid: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"_id": ObjectId(fid)} if u["role"] == "admin" else {"_id": ObjectId(fid), "owner_id": uid}
-    res = await db.farms.delete_one(q)
-    if res.deleted_count == 0: raise HTTPException(404, "Exploitation introuvable")
+    pool = get_pool()
+    if u["role"] == "admin":
+        result = await pool.execute("DELETE FROM farms WHERE id = $1", fid)
+    else:
+        result = await pool.execute("DELETE FROM farms WHERE id = $1 AND owner_id = $2", fid, u["id"])
+    if result == "DELETE 0": raise HTTPException(404, "Exploitation introuvable")
     return {"message": "Exploitation supprimée"}
 
 # ─── PLOTS ────────────────────────────────────────────────────────────────────
 @api_router.get("/plots")
 async def get_plots(request: Request, farm_id: Optional[str] = None):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {} if u["role"] == "admin" else {"owner_id": uid}
-    if farm_id: q["farm_id"] = farm_id
-    return docs(await db.plots.find(q).to_list(500))
+    pool = get_pool()
+    conds, params = [], []
+    if u["role"] != "admin":
+        params.append(u["id"]); conds.append(f"owner_id = ${len(params)}")
+    if farm_id:
+        params.append(farm_id); conds.append(f"farm_id = ${len(params)}")
+    where = f"WHERE {' AND '.join(conds)}" if conds else ""
+    rows = await pool.fetch(f"SELECT * FROM plots {where} ORDER BY created_at DESC LIMIT 500", *params)
+    return docs(rows)
 
 @api_router.post("/plots")
 async def create_plot(data: PlotCreate, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
+    uid = u["id"]
+    pool = get_pool()
     if u["role"] != "admin":
-        farm = await db.farms.find_one({"_id": ObjectId(data.farm_id), "owner_id": uid})
+        farm = await pool.fetchrow("SELECT id FROM farms WHERE id = $1 AND owner_id = $2", data.farm_id, uid)
         if not farm: raise HTTPException(403, "Accès refusé à cette exploitation")
-    now = datetime.now(timezone.utc)
-    r = await db.plots.insert_one({"farm_id": data.farm_id, "owner_id": uid,
-        "name": data.name, "location": data.location, "area": data.area,
-        "crop_type": data.crop_type, "sowing_date": data.sowing_date, "notes": data.notes,
-        "status": data.status, "created_at": now, "updated_at": now})
-    return doc(await db.plots.find_one({"_id": r.inserted_id}))
+    row = await pool.fetchrow("""
+        INSERT INTO plots (farm_id, owner_id, name, location, area, crop_type, sowing_date, notes, status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *""",
+        data.farm_id, uid, data.name, data.location, data.area, data.crop_type,
+        data.sowing_date, data.notes, data.status)
+    return doc(row)
 
 @api_router.get("/plots/{pid}")
 async def get_plot(pid: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"_id": ObjectId(pid)} if u["role"] == "admin" else {"_id": ObjectId(pid), "owner_id": uid}
-    p = await db.plots.find_one(q)
+    pool = get_pool()
+    if u["role"] == "admin":
+        p = await pool.fetchrow("SELECT * FROM plots WHERE id = $1", pid)
+    else:
+        p = await pool.fetchrow("SELECT * FROM plots WHERE id = $1 AND owner_id = $2", pid, u["id"])
     if not p: raise HTTPException(404, "Parcelle introuvable")
     return doc(p)
 
 @api_router.put("/plots/{pid}")
 async def update_plot(pid: str, data: PlotUpdate, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"_id": ObjectId(pid)} if u["role"] == "admin" else {"_id": ObjectId(pid), "owner_id": uid}
-    upd = {k: v for k, v in data.model_dump(exclude_unset=True).items()}
-    upd["updated_at"] = datetime.now(timezone.utc)
-    res = await db.plots.update_one(q, {"$set": upd})
-    if res.matched_count == 0: raise HTTPException(404, "Parcelle introuvable")
-    return doc(await db.plots.find_one({"_id": ObjectId(pid)}))
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        if u["role"] == "admin":
+            p = await conn.fetchrow("SELECT id FROM plots WHERE id = $1", pid)
+        else:
+            p = await conn.fetchrow("SELECT id FROM plots WHERE id = $1 AND owner_id = $2", pid, u["id"])
+        if not p: raise HTTPException(404, "Parcelle introuvable")
+        # Note: unlike farms, plot updates don't filter out None — a field can be explicitly nulled.
+        fields = data.model_dump(exclude_unset=True)
+        if fields:
+            set_clause = ", ".join(f"{k} = ${i + 2}" for i, k in enumerate(fields))
+            await conn.execute(f"UPDATE plots SET {set_clause}, updated_at = now() WHERE id = $1",
+                                pid, *fields.values())
+        updated = await conn.fetchrow("SELECT * FROM plots WHERE id = $1", pid)
+    return doc(updated)
 
 @api_router.delete("/plots/{pid}")
 async def delete_plot(pid: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"_id": ObjectId(pid)} if u["role"] == "admin" else {"_id": ObjectId(pid), "owner_id": uid}
-    res = await db.plots.delete_one(q)
-    if res.deleted_count == 0: raise HTTPException(404, "Parcelle introuvable")
+    pool = get_pool()
+    if u["role"] == "admin":
+        result = await pool.execute("DELETE FROM plots WHERE id = $1", pid)
+    else:
+        result = await pool.execute("DELETE FROM plots WHERE id = $1 AND owner_id = $2", pid, u["id"])
+    if result == "DELETE 0": raise HTTPException(404, "Parcelle introuvable")
     return {"message": "Parcelle supprimée"}
 
 # ─── DEVICES ──────────────────────────────────────────────────────────────────
 @api_router.get("/devices")
 async def get_devices(request: Request, farm_id: Optional[str] = None, plot_id: Optional[str] = None):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {} if u["role"] == "admin" else {"owner_id": uid}
-    if farm_id: q["farm_id"] = farm_id
-    if plot_id: q["plot_id"] = plot_id
-    return docs(await db.devices.find(q).to_list(500))
+    pool = get_pool()
+    conds, params = [], []
+    if u["role"] != "admin":
+        params.append(u["id"]); conds.append(f"owner_id = ${len(params)}")
+    if farm_id:
+        params.append(farm_id); conds.append(f"farm_id = ${len(params)}")
+    if plot_id:
+        params.append(plot_id); conds.append(f"plot_id = ${len(params)}")
+    where = f"WHERE {' AND '.join(conds)}" if conds else ""
+    rows = await pool.fetch(f"SELECT * FROM devices {where} ORDER BY created_at DESC LIMIT 500", *params)
+    return docs(rows)
 
 @api_router.post("/devices")
 async def create_device(data: DeviceCreate, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    if await db.devices.find_one({"device_uid": data.device_uid}):
+    uid = u["id"]
+    pool = get_pool()
+    if await pool.fetchrow("SELECT id FROM devices WHERE device_uid = $1", data.device_uid):
         raise HTTPException(400, "Cet identifiant d'appareil est déjà utilisé")
-    now = datetime.now(timezone.utc)
-    r = await db.devices.insert_one({"farm_id": data.farm_id, "plot_id": data.plot_id,
-        "owner_id": uid, "name": data.name, "device_uid": data.device_uid,
-        "device_type": data.device_type, "sensor_types": data.sensor_types,
-        "status": "offline", "battery_level": 100, "signal_strength": 0,
-        "firmware_version": data.firmware_version, "maintenance_notes": data.maintenance_notes,
-        "last_sync": None, "created_at": now, "updated_at": now})
-    return doc(await db.devices.find_one({"_id": r.inserted_id}))
+    row = await pool.fetchrow("""
+        INSERT INTO devices (farm_id, plot_id, owner_id, name, device_uid, device_type, sensor_types,
+                              status, battery_level, signal_strength, firmware_version, maintenance_notes)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,'offline',100,0,$8,$9) RETURNING *""",
+        data.farm_id, data.plot_id, uid, data.name, data.device_uid, data.device_type,
+        data.sensor_types, data.firmware_version, data.maintenance_notes)
+    return doc(row)
 
 @api_router.get("/devices/{did}")
 async def get_device(did: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"_id": ObjectId(did)} if u["role"] == "admin" else {"_id": ObjectId(did), "owner_id": uid}
-    d = await db.devices.find_one(q)
+    pool = get_pool()
+    if u["role"] == "admin":
+        d = await pool.fetchrow("SELECT * FROM devices WHERE id = $1", did)
+    else:
+        d = await pool.fetchrow("SELECT * FROM devices WHERE id = $1 AND owner_id = $2", did, u["id"])
     if not d: raise HTTPException(404, "Appareil introuvable")
     return doc(d)
 
 @api_router.put("/devices/{did}")
 async def update_device(did: str, data: DeviceUpdate, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"_id": ObjectId(did)} if u["role"] == "admin" else {"_id": ObjectId(did), "owner_id": uid}
-    upd = {k: v for k, v in data.model_dump(exclude_unset=True).items()}
-    upd["updated_at"] = datetime.now(timezone.utc)
-    res = await db.devices.update_one(q, {"$set": upd})
-    if res.matched_count == 0: raise HTTPException(404, "Appareil introuvable")
-    return doc(await db.devices.find_one({"_id": ObjectId(did)}))
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        if u["role"] == "admin":
+            d = await conn.fetchrow("SELECT id FROM devices WHERE id = $1", did)
+        else:
+            d = await conn.fetchrow("SELECT id FROM devices WHERE id = $1 AND owner_id = $2", did, u["id"])
+        if not d: raise HTTPException(404, "Appareil introuvable")
+        # Note: like plots, device updates don't filter out None.
+        fields = data.model_dump(exclude_unset=True)
+        if fields:
+            set_clause = ", ".join(f"{k} = ${i + 2}" for i, k in enumerate(fields))
+            await conn.execute(f"UPDATE devices SET {set_clause}, updated_at = now() WHERE id = $1",
+                                did, *fields.values())
+        updated = await conn.fetchrow("SELECT * FROM devices WHERE id = $1", did)
+    return doc(updated)
 
 @api_router.delete("/devices/{did}")
 async def delete_device(did: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"_id": ObjectId(did)} if u["role"] == "admin" else {"_id": ObjectId(did), "owner_id": uid}
-    res = await db.devices.delete_one(q)
-    if res.deleted_count == 0: raise HTTPException(404, "Appareil introuvable")
+    pool = get_pool()
+    if u["role"] == "admin":
+        result = await pool.execute("DELETE FROM devices WHERE id = $1", did)
+    else:
+        result = await pool.execute("DELETE FROM devices WHERE id = $1 AND owner_id = $2", did, u["id"])
+    if result == "DELETE 0": raise HTTPException(404, "Appareil introuvable")
     return {"message": "Appareil supprimé"}
 
 # ─── SENSOR READINGS ──────────────────────────────────────────────────────────
@@ -522,44 +538,57 @@ async def delete_device(did: str, request: Request):
 async def get_readings(request: Request, device_id: Optional[str] = None,
                        plot_id: Optional[str] = None, limit: int = 100, hours: int = 48):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
+    pool = get_pool()
     since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    q = {"owner_id": uid, "timestamp": {"$gte": since}}
-    if device_id: q["device_id"] = device_id
-    if plot_id: q["plot_id"] = plot_id
-    readings = await db.sensor_readings.find(q).sort("timestamp", -1).to_list(limit)
-    return docs(readings)
+    conds, params = ["owner_id = $1", '"timestamp" >= $2'], [u["id"], since]
+    if device_id:
+        params.append(device_id); conds.append(f"device_id = ${len(params)}")
+    if plot_id:
+        params.append(plot_id); conds.append(f"plot_id = ${len(params)}")
+    params.append(limit)
+    rows = await pool.fetch(
+        f'SELECT * FROM sensor_readings WHERE {" AND ".join(conds)} ORDER BY "timestamp" DESC LIMIT ${len(params)}',
+        *params)
+    return docs(rows)
 
 @api_router.post("/readings")
 async def create_reading(data: ReadingCreate, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
+    uid = u["id"]
     now = datetime.now(timezone.utc)
     values = {k: v for k, v in data.model_dump().items() if k not in ("device_id", "plot_id")}
     reading = await _ingest_reading(uid, data.device_id, data.plot_id, values, now)
     return doc(reading)
 
-async def _ingest_reading(owner_id: str, device_id: str, plot_id: Optional[str], values: dict, now: datetime) -> dict:
+async def _ingest_reading(owner_id, device_id, plot_id, values: dict, now: datetime):
     """Shared by the manual /readings endpoint (JWT) and the hardware /ingest/batch endpoint (gateway key)."""
     reading = {k: v for k, v in values.items() if v is not None}
-    reading["device_id"] = device_id
-    reading["plot_id"] = plot_id
-    reading["owner_id"] = owner_id
-    reading["timestamp"] = now
-    r = await db.sensor_readings.insert_one(reading)
-    await db.devices.update_one({"_id": ObjectId(device_id)},
-        {"$set": {"last_sync": now, "status": "online", "signal_strength": 80, "updated_at": now}})
-    await _check_alerts(owner_id, device_id, plot_id, reading, now)
-    return await db.sensor_readings.find_one({"_id": r.inserted_id})
+    cols = ["device_id", "plot_id", "owner_id", '"timestamp"'] + list(reading.keys())
+    placeholders = [f"${i + 1}" for i in range(len(cols))]
+    vals = [device_id, plot_id, owner_id, now] + list(reading.values())
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                f"INSERT INTO sensor_readings ({', '.join(cols)}) VALUES ({', '.join(placeholders)}) RETURNING *",
+                *vals)
+            await conn.execute(
+                "UPDATE devices SET last_sync = $1, status = 'online', signal_strength = 80, updated_at = $1 WHERE id = $2",
+                now, device_id)
+    await _check_alerts(owner_id, device_id, plot_id, dict(row), now)
+    return row
 
-async def _check_alerts(uid: str, device_id: str, plot_id: Optional[str], reading: dict, now: datetime):
+async def _check_alerts(uid, device_id, plot_id, reading: dict, now: datetime):
+    pool = get_pool()
+
     async def _alert(atype: str, sev: str, title: str, msg: str):
-        existing = await db.alerts.find_one({"device_id": device_id, "type": atype, "is_resolved": False})
-        if not existing:
-            await db.alerts.insert_one({"owner_id": uid, "device_id": device_id,
-                "plot_id": plot_id, "type": atype, "severity": sev,
-                "title": title, "message": msg, "is_read": False, "is_resolved": False,
-                "resolved_at": None, "created_at": now})
+        # Atomic guard via the partial unique index (device_id, type) WHERE is_resolved = FALSE
+        # — replaces the old Mongo find-then-insert pattern (race-prone).
+        await pool.execute("""
+            INSERT INTO alerts (owner_id, device_id, plot_id, type, severity, title, message, created_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            ON CONFLICT (device_id, type) WHERE is_resolved = FALSE DO NOTHING""",
+            uid, device_id, plot_id, atype, sev, title, msg, now)
 
     soil_moisture = reading.get("soil_moisture")
     if soil_moisture is not None:
@@ -586,18 +615,20 @@ async def _check_alerts(uid: str, device_id: str, plot_id: Optional[str], readin
 @api_router.post("/ingest/batch")
 async def ingest_batch(data: BatchIngestReq, request: Request):
     farm = await get_farm_from_gateway_key(request)
-    farm_id = str(farm["_id"])
+    farm_id = farm["id"]
+    pool = get_pool()
     now = datetime.now(timezone.utc)
     accepted = 0
     rejected = []
     for item in data.readings:
-        device = await db.devices.find_one({"device_uid": item.device_uid, "farm_id": farm_id})
+        device = await pool.fetchrow("SELECT * FROM devices WHERE device_uid = $1 AND farm_id = $2",
+                                      item.device_uid, farm_id)
         if not device:
             rejected.append({"device_uid": item.device_uid,
                               "reason": "Appareil non enregistré pour cette exploitation"})
             continue
         values = item.model_dump(exclude={"device_uid"})
-        await _ingest_reading(device["owner_id"], str(device["_id"]), device.get("plot_id"), values, now)
+        await _ingest_reading(device["owner_id"], device["id"], device["plot_id"], values, now)
         accepted += 1
     return {"accepted": accepted, "rejected": rejected}
 
@@ -606,71 +637,92 @@ async def ingest_batch(data: BatchIngestReq, request: Request):
 async def get_alerts(request: Request, severity: Optional[str] = None,
                      is_resolved: Optional[bool] = None, limit: int = 100):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"owner_id": uid}
-    if severity: q["severity"] = severity
-    if is_resolved is not None: q["is_resolved"] = is_resolved
-    alerts = await db.alerts.find(q).sort("created_at", -1).to_list(limit)
-    return docs(alerts)
+    pool = get_pool()
+    conds, params = ["owner_id = $1"], [u["id"]]
+    if severity:
+        params.append(severity); conds.append(f"severity = ${len(params)}")
+    if is_resolved is not None:
+        params.append(is_resolved); conds.append(f"is_resolved = ${len(params)}")
+    params.append(limit)
+    rows = await pool.fetch(
+        f'SELECT * FROM alerts WHERE {" AND ".join(conds)} ORDER BY created_at DESC LIMIT ${len(params)}', *params)
+    return docs(rows)
 
 @api_router.put("/alerts/{aid}/read")
 async def mark_alert_read(aid: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    await db.alerts.update_one({"_id": ObjectId(aid), "owner_id": uid}, {"$set": {"is_read": True}})
+    await get_pool().execute("UPDATE alerts SET is_read = TRUE WHERE id = $1 AND owner_id = $2", aid, u["id"])
     return {"message": "Alerte marquée comme lue"}
 
 @api_router.put("/alerts/{aid}/resolve")
 async def resolve_alert(aid: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
     now = datetime.now(timezone.utc)
-    await db.alerts.update_one({"_id": ObjectId(aid), "owner_id": uid},
-        {"$set": {"is_resolved": True, "is_read": True, "resolved_at": now}})
+    await get_pool().execute(
+        "UPDATE alerts SET is_resolved = TRUE, is_read = TRUE, resolved_at = $1 WHERE id = $2 AND owner_id = $3",
+        now, aid, u["id"])
     return {"message": "Alerte résolue"}
 
 @api_router.delete("/alerts/{aid}")
 async def delete_alert(aid: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    await db.alerts.delete_one({"_id": ObjectId(aid), "owner_id": uid})
+    await get_pool().execute("DELETE FROM alerts WHERE id = $1 AND owner_id = $2", aid, u["id"])
     return {"message": "Alerte supprimée"}
 
 # ─── PREDICTIONS ──────────────────────────────────────────────────────────────
 @api_router.get("/predictions")
 async def get_predictions(request: Request, plot_id: Optional[str] = None, limit: int = 20):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    q = {"owner_id": uid}
-    if plot_id: q["plot_id"] = plot_id
-    preds = await db.predictions.find(q).sort("created_at", -1).to_list(limit)
-    return docs(preds)
+    pool = get_pool()
+    conds, params = ["owner_id = $1"], [u["id"]]
+    if plot_id:
+        params.append(plot_id); conds.append(f"plot_id = ${len(params)}")
+    params.append(limit)
+    rows = await pool.fetch(
+        f'SELECT * FROM predictions WHERE {" AND ".join(conds)} ORDER BY created_at DESC LIMIT ${len(params)}', *params)
+    return docs(rows)
 
 @api_router.post("/predictions/generate/{plot_id}")
 async def generate_predictions(plot_id: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    plot = await db.plots.find_one({"_id": ObjectId(plot_id), "owner_id": uid})
+    uid = u["id"]
+    pool = get_pool()
+    plot = await pool.fetchrow("SELECT * FROM plots WHERE id = $1 AND owner_id = $2", plot_id, uid)
     if not plot: raise HTTPException(404, "Parcelle introuvable")
 
     since = datetime.now(timezone.utc) - timedelta(hours=72)
-    readings = await db.sensor_readings.find(
-        {"plot_id": plot_id, "owner_id": uid, "timestamp": {"$gte": since}}
-    ).sort("timestamp", 1).to_list(200)
+    readings = await pool.fetch(
+        'SELECT * FROM sensor_readings WHERE plot_id = $1 AND owner_id = $2 AND "timestamp" >= $3 '
+        'ORDER BY "timestamp" ASC LIMIT 200', plot_id, uid, since)
+    readings = [dict(r) for r in readings]
 
     now = datetime.now(timezone.utc)
-    new_preds = _compute_predictions(readings, plot, uid, now)
+    new_preds = _compute_predictions(readings, dict(plot), uid, now)
     if new_preds:
-        await db.predictions.delete_many({"plot_id": plot_id, "owner_id": uid})
-        await db.predictions.insert_many(new_preds)
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute("DELETE FROM predictions WHERE plot_id = $1 AND owner_id = $2", plot_id, uid)
+            for p in new_preds:
+                await conn.execute("""
+                    INSERT INTO predictions (owner_id, plot_id, farm_id, plot_name, target_variable,
+                        forecast_horizon, predicted_value, confidence, trend, risk_level,
+                        explanation, recommended_action, created_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)""",
+                    p["owner_id"], p["plot_id"], p["farm_id"] or None, p["plot_name"], p["target_variable"],
+                    p["forecast_horizon"], p["predicted_value"], p["confidence"], p["trend"], p["risk_level"],
+                    p["explanation"], p["recommended_action"], p["created_at"])
 
-    saved = await db.predictions.find({"plot_id": plot_id, "owner_id": uid}).to_list(20)
+    saved = await pool.fetch(
+        "SELECT * FROM predictions WHERE plot_id = $1 AND owner_id = $2 ORDER BY created_at DESC LIMIT 20",
+        plot_id, uid)
     return docs(saved)
 
-def _compute_predictions(readings: list, plot: dict, uid: str, now: datetime) -> list:
+# TODO(ML): Point d'extension pour le futur modèle de prédiction d'humidité —
+# une fois le pipeline Bronze/Silver/Gold (n8n) en place, remplacer/augmenter
+# cette heuristique par un modèle entraîné consommant gold.plot_features.
+def _compute_predictions(readings: list, plot: dict, uid, now: datetime) -> list:
     preds = []
-    plot_id = str(plot["_id"])
-    farm_id = plot.get("farm_id", "")
+    plot_id = plot["id"]
+    farm_id = str(plot.get("farm_id") or "")
     plot_name = plot.get("name", "Parcelle")
 
     if not readings:
@@ -765,70 +817,69 @@ async def get_profile(request: Request):
 @api_router.put("/profile")
 async def update_profile(data: ProfileUpdate, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    upd = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None}
-    upd["updated_at"] = datetime.now(timezone.utc)
-    await db.users.update_one({"_id": ObjectId(uid)}, {"$set": upd})
-    user = await db.users.find_one({"_id": ObjectId(uid)})
-    user["_id"] = str(user["_id"])
-    user.pop("password_hash", None)
-    for k, v in user.items():
-        if isinstance(v, datetime): user[k] = v.isoformat()
-    return user
+    uid = u["id"]
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await pg_update(conn, "users", uid, data.model_dump(exclude_unset=True))
+        user = await conn.fetchrow("SELECT * FROM users WHERE id = $1", uid)
+    d = doc(user)
+    d.pop("password_hash", None)
+    return d
 
 @api_router.put("/profile/password")
 async def change_password(data: PasswordChange, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    user = await db.users.find_one({"_id": ObjectId(uid)})
-    if not verify_password(data.current_password, user.get("password_hash", "")):
+    uid = u["id"]
+    pool = get_pool()
+    user = await pool.fetchrow("SELECT * FROM users WHERE id = $1", uid)
+    if not verify_password(data.current_password, user["password_hash"]):
         raise HTTPException(400, "Mot de passe actuel incorrect")
-    await db.users.update_one({"_id": ObjectId(uid)},
-        {"$set": {"password_hash": hash_password(data.new_password), "updated_at": datetime.now(timezone.utc)}})
+    await pool.execute("UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2",
+        hash_password(data.new_password), uid)
     return {"message": "Mot de passe modifié avec succès"}
 
 # ─── ONBOARDING ───────────────────────────────────────────────────────────────
 @api_router.get("/onboarding/status")
 async def onboarding_status(request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    farms = await db.farms.count_documents({"owner_id": uid})
-    plots = await db.plots.count_documents({"owner_id": uid})
-    devices = await db.devices.count_documents({"owner_id": uid})
+    uid = u["id"]
+    pool = get_pool()
+    farms = await pool.fetchval("SELECT COUNT(*) FROM farms WHERE owner_id = $1", uid)
+    plots = await pool.fetchval("SELECT COUNT(*) FROM plots WHERE owner_id = $1", uid)
+    devices = await pool.fetchval("SELECT COUNT(*) FROM devices WHERE owner_id = $1", uid)
     return {"onboarding_completed": u.get("onboarding_completed", False),
             "has_farm": farms > 0, "has_plot": plots > 0, "has_device": devices > 0}
 
 @api_router.post("/onboarding/complete")
 async def complete_onboarding(request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    await db.users.update_one({"_id": ObjectId(uid)},
-        {"$set": {"onboarding_completed": True, "updated_at": datetime.now(timezone.utc)}})
+    await get_pool().execute("UPDATE users SET onboarding_completed = TRUE, updated_at = now() WHERE id = $1", u["id"])
     return {"message": "Onboarding terminé"}
 
 # ─── DASHBOARD STATS ──────────────────────────────────────────────────────────
 @api_router.get("/dashboard/stats")
 async def dashboard_stats(request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    farms = await db.farms.count_documents({"owner_id": uid})
-    plots = await db.plots.count_documents({"owner_id": uid})
-    total_dev = await db.devices.count_documents({"owner_id": uid})
-    online_dev = await db.devices.count_documents({"owner_id": uid, "status": "online"})
-    active_alerts = await db.alerts.count_documents({"owner_id": uid, "is_resolved": False})
-    critical_alerts = await db.alerts.count_documents({"owner_id": uid, "is_resolved": False, "severity": "critical"})
+    uid = u["id"]
+    pool = get_pool()
+    farms = await pool.fetchval("SELECT COUNT(*) FROM farms WHERE owner_id = $1", uid)
+    plots = await pool.fetchval("SELECT COUNT(*) FROM plots WHERE owner_id = $1", uid)
+    total_dev = await pool.fetchval("SELECT COUNT(*) FROM devices WHERE owner_id = $1", uid)
+    online_dev = await pool.fetchval("SELECT COUNT(*) FROM devices WHERE owner_id = $1 AND status = 'online'", uid)
+    active_alerts = await pool.fetchval("SELECT COUNT(*) FROM alerts WHERE owner_id = $1 AND is_resolved = FALSE", uid)
+    critical_alerts = await pool.fetchval(
+        "SELECT COUNT(*) FROM alerts WHERE owner_id = $1 AND is_resolved = FALSE AND severity = 'critical'", uid)
 
     since_24h = datetime.now(timezone.utc) - timedelta(hours=24)
-    recent_readings = await db.sensor_readings.find(
-        {"owner_id": uid, "timestamp": {"$gte": since_24h}}
-    ).to_list(500)
+    recent_readings = await pool.fetch(
+        'SELECT * FROM sensor_readings WHERE owner_id = $1 AND "timestamp" >= $2 LIMIT 500', uid, since_24h)
 
     avg_moisture, avg_temp, avg_npk = None, None, None
-    moisture_vals = [r["soil_moisture"] for r in recent_readings if r.get("soil_moisture") is not None]
-    temp_vals = [r["air_temperature"] for r in recent_readings if r.get("air_temperature") is not None]
-    n_vals = [r["soil_nitrogen"] for r in recent_readings if r.get("soil_nitrogen") is not None]
-    p_vals = [r["soil_phosphorus"] for r in recent_readings if r.get("soil_phosphorus") is not None]
-    k_vals = [r["soil_potassium"] for r in recent_readings if r.get("soil_potassium") is not None]
+    moisture_vals = [r["soil_moisture"] for r in recent_readings if r["soil_moisture"] is not None]
+    temp_vals = [r["air_temperature"] for r in recent_readings if r["air_temperature"] is not None]
+    n_vals = [r["soil_nitrogen"] for r in recent_readings if r["soil_nitrogen"] is not None]
+    p_vals = [r["soil_phosphorus"] for r in recent_readings if r["soil_phosphorus"] is not None]
+    k_vals = [r["soil_potassium"] for r in recent_readings if r["soil_potassium"] is not None]
 
     if moisture_vals: avg_moisture = round(sum(moisture_vals)/len(moisture_vals), 1)
     if temp_vals: avg_temp = round(sum(temp_vals)/len(temp_vals), 1)
@@ -844,98 +895,107 @@ async def dashboard_stats(request: Request):
 @api_router.get("/notifications")
 async def get_notifications(request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    notifs = await db.notifications.find({"user_id": uid}).sort("created_at", -1).to_list(50)
-    return docs(notifs)
+    rows = await get_pool().fetch("SELECT * FROM notifications WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50", u["id"])
+    return docs(rows)
 
 @api_router.put("/notifications/{nid}/read")
 async def mark_notif_read(nid: str, request: Request):
     u = await get_current_user(request)
-    uid = u.get("_id") or u.get("id")
-    await db.notifications.update_one({"_id": ObjectId(nid), "user_id": uid}, {"$set": {"is_read": True}})
+    await get_pool().execute("UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2", nid, u["id"])
     return {"message": "Notification marquée comme lue"}
 
 # ─── ADMIN ────────────────────────────────────────────────────────────────────
 @api_router.get("/admin/stats")
 async def admin_stats(request: Request):
     await require_admin(request)
-    total_users = await db.users.count_documents({"role": "farmer"})
-    active_users = await db.users.count_documents({"role": "farmer", "status": "active"})
-    pending_users = await db.users.count_documents({"role": "farmer", "status": "pending"})
-    total_farms = await db.farms.count_documents({})
-    total_plots = await db.plots.count_documents({})
-    total_devices = await db.devices.count_documents({})
-    online_devices = await db.devices.count_documents({"status": "online"})
-    critical_alerts = await db.alerts.count_documents({"severity": "critical", "is_resolved": False})
+    pool = get_pool()
+    total_users = await pool.fetchval("SELECT COUNT(*) FROM users WHERE role = 'farmer'")
+    active_users = await pool.fetchval("SELECT COUNT(*) FROM users WHERE role = 'farmer' AND status = 'active'")
+    pending_users = await pool.fetchval("SELECT COUNT(*) FROM users WHERE role = 'farmer' AND status = 'pending'")
+    total_farms = await pool.fetchval("SELECT COUNT(*) FROM farms")
+    total_plots = await pool.fetchval("SELECT COUNT(*) FROM plots")
+    total_devices = await pool.fetchval("SELECT COUNT(*) FROM devices")
+    online_devices = await pool.fetchval("SELECT COUNT(*) FROM devices WHERE status = 'online'")
+    critical_alerts = await pool.fetchval("SELECT COUNT(*) FROM alerts WHERE severity = 'critical' AND is_resolved = FALSE")
+    prediction_jobs = await pool.fetchval("SELECT COUNT(*) FROM predictions")
     return {"total_users": total_users, "active_users": active_users,
             "pending_users": pending_users, "total_farms": total_farms,
             "total_plots": total_plots, "total_devices": total_devices,
             "online_devices": online_devices, "critical_alerts": critical_alerts,
-            "prediction_jobs": await db.predictions.count_documents({})}
+            "prediction_jobs": prediction_jobs}
 
 @api_router.get("/admin/users")
 async def admin_users(request: Request, status: Optional[str] = None, search: Optional[str] = None):
     await require_admin(request)
-    q = {"role": "farmer"}
-    if status: q["status"] = status
-    if search: q["$or"] = [{"email": {"$regex": search, "$options": "i"}},
-                            {"first_name": {"$regex": search, "$options": "i"}},
-                            {"last_name": {"$regex": search, "$options": "i"}}]
-    users = await db.users.find(q, {"password_hash": 0}).to_list(500)
+    pool = get_pool()
+    conds, params = ["role = 'farmer'"], []
+    if status:
+        params.append(status); conds.append(f"status = ${len(params)}")
+    if search:
+        params.append(f"%{search}%")
+        conds.append(f"(email ILIKE ${len(params)} OR first_name ILIKE ${len(params)} OR last_name ILIKE ${len(params)})")
+    rows = await pool.fetch(f"SELECT * FROM users WHERE {' AND '.join(conds)} ORDER BY created_at DESC LIMIT 500", *params)
     result = []
-    for u in users:
+    for u in rows:
         ud = doc(u)
-        ud["farms_count"] = await db.farms.count_documents({"owner_id": ud["id"]})
-        ud["devices_count"] = await db.devices.count_documents({"owner_id": ud["id"]})
+        ud.pop("password_hash", None)
+        ud["farms_count"] = await pool.fetchval("SELECT COUNT(*) FROM farms WHERE owner_id = $1", u["id"])
+        ud["devices_count"] = await pool.fetchval("SELECT COUNT(*) FROM devices WHERE owner_id = $1", u["id"])
         result.append(ud)
     return result
 
 @api_router.put("/admin/users/{uid}/status")
 async def admin_update_user_status(uid: str, data: UserStatusUpdate, request: Request):
     await require_admin(request)
-    await db.users.update_one({"_id": ObjectId(uid)},
-        {"$set": {"status": data.status, "updated_at": datetime.now(timezone.utc)}})
+    await get_pool().execute("UPDATE users SET status = $1, updated_at = now() WHERE id = $2", data.status, uid)
     return {"message": f"Statut mis à jour: {data.status}"}
 
 @api_router.get("/admin/farms")
 async def admin_farms(request: Request):
     await require_admin(request)
-    farms = await db.farms.find({}).to_list(1000)
+    pool = get_pool()
+    farms = await pool.fetch("SELECT * FROM farms ORDER BY created_at DESC LIMIT 1000")
     result = []
     for f in farms:
         fd = farm_doc(f)
-        user = await db.users.find_one({"_id": ObjectId(f["owner_id"])}, {"first_name": 1, "last_name": 1, "email": 1})
+        user = await pool.fetchrow("SELECT first_name, last_name, email FROM users WHERE id = $1", f["owner_id"])
         fd["owner_name"] = f"{user['first_name']} {user['last_name']}" if user else "Inconnu"
-        fd["owner_email"] = user.get("email", "") if user else ""
-        fd["plots_count"] = await db.plots.count_documents({"farm_id": str(f["_id"])})
-        fd["devices_count"] = await db.devices.count_documents({"farm_id": str(f["_id"])})
+        fd["owner_email"] = user["email"] if user else ""
+        fd["plots_count"] = await pool.fetchval("SELECT COUNT(*) FROM plots WHERE farm_id = $1", f["id"])
+        fd["devices_count"] = await pool.fetchval("SELECT COUNT(*) FROM devices WHERE farm_id = $1", f["id"])
         result.append(fd)
     return result
 
 @api_router.get("/admin/devices")
 async def admin_devices(request: Request, status: Optional[str] = None):
     await require_admin(request)
-    q = {"status": status} if status else {}
-    devices = await db.devices.find(q).to_list(1000)
-    return docs(devices)
+    pool = get_pool()
+    if status:
+        rows = await pool.fetch("SELECT * FROM devices WHERE status = $1 ORDER BY created_at DESC LIMIT 1000", status)
+    else:
+        rows = await pool.fetch("SELECT * FROM devices ORDER BY created_at DESC LIMIT 1000")
+    return docs(rows)
 
 @api_router.get("/admin/alerts")
 async def admin_alerts(request: Request, severity: Optional[str] = None):
     await require_admin(request)
-    q = {"severity": severity} if severity else {}
-    alerts = await db.alerts.find(q).sort("created_at", -1).to_list(500)
-    return docs(alerts)
+    pool = get_pool()
+    if severity:
+        rows = await pool.fetch("SELECT * FROM alerts WHERE severity = $1 ORDER BY created_at DESC LIMIT 500", severity)
+    else:
+        rows = await pool.fetch("SELECT * FROM alerts ORDER BY created_at DESC LIMIT 500")
+    return docs(rows)
 
 @api_router.get("/admin/audit-logs")
 async def admin_audit_logs(request: Request, limit: int = 100):
     await require_admin(request)
-    logs = await db.audit_logs.find({}).sort("created_at", -1).to_list(limit)
-    return docs(logs)
+    rows = await get_pool().fetch("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT $1", limit)
+    return docs(rows)
 
-async def _audit(uid: str, action: str, resource_type: str, resource_id: str = "", details: dict = None):
-    await db.audit_logs.insert_one({"user_id": uid, "action": action,
-        "resource_type": resource_type, "resource_id": resource_id,
-        "details": details or {}, "created_at": datetime.now(timezone.utc)})
+async def _audit(uid, action: str, resource_type: str, resource_id: str = "", details: dict = None):
+    await get_pool().execute(
+        "INSERT INTO audit_logs (user_id, action, resource_type, resource_id, details) VALUES ($1,$2,$3,$4,$5)",
+        uid, action, resource_type, resource_id, details or {})
 
 # ─── Include router ───────────────────────────────────────────────────────────
 app.include_router(api_router)
