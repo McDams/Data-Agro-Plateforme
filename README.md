@@ -16,8 +16,10 @@
 8. [Flux d'authentification](#flux-dauthentification)
 9. [Rôles et accès](#rôles-et-accès)
 10. [Intégration matérielle (ESP32 + LoRa + Raspberry Pi 4)](#intégration-matérielle-esp32--lora--raspberry-pi-4)
-11. [Structure du projet](#structure-du-projet)
-12. [Comptes de test](#comptes-de-test)
+11. [Pipeline Big Data — Lakehouse Bronze/Silver/Gold (n8n)](#pipeline-big-data--lakehouse-bronzesilvergold-n8n)
+12. [Simulateur de nœuds LoRa](#simulateur-de-nœuds-lora)
+13. [Structure du projet](#structure-du-projet)
+14. [Comptes de test](#comptes-de-test)
 
 ---
 
@@ -65,15 +67,19 @@
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      Backend (FastAPI)                       │
-│  Python + FastAPI + Motor (async MongoDB driver)            │
+│  Python + FastAPI + asyncpg (driver PostgreSQL async)        │
 │  Port: 8001                                                  │
 │  Auth: JWT Bearer tokens (localStorage) + httpOnly cookies  │
 └──────────────────────────┬──────────────────────────────────┘
-                           │ Motor async driver
+                           │ asyncpg (SQL paramétré, sans ORM)
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                      Base de données                         │
-│  MongoDB (localhost:27017)                                   │
+│                 PostgreSQL (localhost:5432)                  │
+│  Schéma opérationnel (public) : users, farms, plots,          │
+│  devices, sensor_readings, alerts, predictions...             │
+│                           +                                   │
+│  Lakehouse Bronze/Silver/Gold — voir section dédiée           │
+│  (alimenté par n8n : Agro_Bronze_to_Silver, Agro_Silver_to_Gold)│
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -87,10 +93,14 @@
 
 **Stack Backend**
 - FastAPI (framework Python async)
-- Motor (driver MongoDB async)
+- asyncpg (driver PostgreSQL async, SQL paramétré à la main — pas d'ORM)
 - PyJWT (tokens JWT)
 - Bcrypt (hachage de mots de passe)
 - Pydantic v2 (validation des données)
+
+**Pipeline Big Data**
+- PostgreSQL (schémas dédiés `bronze` / `silver` / `gold`, architecture médaillon)
+- n8n (orchestration des transformations Bronze→Silver→Gold, planifiées par `scheduleTrigger`)
 
 ---
 
@@ -98,7 +108,8 @@
 
 - **Node.js** >= 18.x et **Yarn** >= 1.x
 - **Python** >= 3.11
-- **MongoDB** >= 6.x (local ou Atlas)
+- **PostgreSQL** >= 13 (pour `gen_random_uuid()` natif, local ou managé)
+- **n8n** >= 1.x (orchestration du pipeline Bronze/Silver/Gold — `npm install -g n8n`)
 - **pip** >= 23.x
 
 ---
@@ -112,7 +123,24 @@ git clone https://github.com/McDams/Data-Agro-Plateforme.git
 cd Data-Agro-Plateforme
 ```
 
-### 2. Backend (FastAPI)
+### 2. Base de données PostgreSQL
+
+```bash
+# Créer le rôle applicatif et la base
+psql -U postgres -c "CREATE ROLE datagro_app WITH LOGIN PASSWORD 'votre-mot-de-passe';"
+psql -U postgres -c "CREATE DATABASE datagro_db OWNER datagro_app;"
+
+# Appliquer le schéma opérationnel (obligatoire)
+psql -U datagro_app -d datagro_db -f backend/db/schema_operational.sql
+
+# Appliquer le schéma du lakehouse (optionnel à ce stade — nécessaire pour la
+# section "Pipeline Big Data" ci-dessous)
+psql -U datagro_app -d datagro_db -f pipeline/schema/bronze.sql
+psql -U datagro_app -d datagro_db -f pipeline/schema/silver.sql
+psql -U datagro_app -d datagro_db -f pipeline/schema/gold.sql
+```
+
+### 3. Backend (FastAPI)
 
 ```bash
 cd backend
@@ -133,7 +161,7 @@ cp .env.example .env
 uvicorn server:app --reload --host 0.0.0.0 --port 8001
 ```
 
-### 3. Frontend (React)
+### 4. Frontend (React)
 
 ```bash
 cd frontend
@@ -162,8 +190,7 @@ La documentation interactive Swagger : `http://localhost:8001/docs`
 ### Backend (`backend/.env`)
 
 ```env
-MONGO_URL=mongodb://localhost:27017
-DB_NAME=datagro_db
+DATABASE_URL=postgresql://datagro_app:votre-mot-de-passe@localhost:5432/datagro_db
 CORS_ORIGINS=http://localhost:3000
 JWT_SECRET=votre-secret-jwt-tres-securise-au-moins-32-chars
 ADMIN_EMAIL=admin@datagro.com
@@ -173,8 +200,7 @@ FRONTEND_URL=http://localhost:3000
 
 | Variable | Description | Exemple |
 |----------|-------------|---------|
-| `MONGO_URL` | URI de connexion MongoDB | `mongodb://localhost:27017` |
-| `DB_NAME` | Nom de la base de données | `datagro_db` |
+| `DATABASE_URL` | URI de connexion PostgreSQL | `postgresql://datagro_app:...@localhost:5432/datagro_db` |
 | `CORS_ORIGINS` | Origines autorisées (séparées par virgule) | `http://localhost:3000` |
 | `JWT_SECRET` | Clé secrète pour signer les tokens JWT | Chaîne aléatoire de 32+ caractères |
 | `ADMIN_EMAIL` | Email du compte administrateur créé au démarrage | `admin@datagro.com` |
@@ -271,122 +297,67 @@ WDS_SOCKET_PORT=3000
 
 ## Schéma de base de données
 
-### Collection `users`
+Le schéma opérationnel complet (DDL) est dans [`backend/db/schema_operational.sql`](backend/db/schema_operational.sql).
+Toutes les tables utilisent des clés primaires `UUID` (`gen_random_uuid()`, natif PostgreSQL ≥ 13) —
+le champ `id` reste une chaîne opaque côté API, comme avant.
 
-```json
-{
-  "_id": "ObjectId",
-  "first_name": "string",
-  "last_name": "string",
-  "email": "string (unique)",
-  "phone": "string?",
-  "farm_name": "string?",
-  "country": "string?",
-  "role": "farmer | admin",
-  "status": "active | suspended | pending",
-  "password_hash": "string (bcrypt)",
-  "onboarding_completed": "boolean",
-  "created_at": "datetime",
-  "updated_at": "datetime"
-}
+### Table `users`
+
+```
+id UUID, first_name, last_name, email (unique), phone?, farm_name?, country?,
+role (farmer|admin), status (active|suspended|pending), password_hash (bcrypt),
+onboarding_completed, created_at, updated_at
 ```
 
-### Collection `farms`
+### Table `farms`
 
-```json
-{
-  "_id": "ObjectId",
-  "name": "string",
-  "location": "string",
-  "description": "string?",
-  "total_area": "float? (hectares)",
-  "owner_id": "string (ref: users._id)",
-  "created_at": "datetime",
-  "updated_at": "datetime"
-}
+```
+id UUID, name, location, description?, total_area? (ha), owner_id (FK users),
+gateway_key_hash? (SHA-256, jamais exposé), gateway_key_prefix?, created_at, updated_at
 ```
 
-### Collection `plots`
+### Table `plots`
 
-```json
-{
-  "_id": "ObjectId",
-  "farm_id": "string (ref: farms._id)",
-  "owner_id": "string (ref: users._id)",
-  "name": "string",
-  "location": "string?",
-  "area": "float? (hectares)",
-  "crop_type": "string?",
-  "sowing_date": "string?",
-  "notes": "string?",
-  "status": "active | inactive",
-  "created_at": "datetime",
-  "updated_at": "datetime"
-}
+```
+id UUID, farm_id (FK farms), owner_id (FK users), name, location?, area? (ha),
+crop_type?, sowing_date?, notes?, status, created_at, updated_at
 ```
 
-### Collection `devices`
+### Table `devices`
 
-```json
-{
-  "_id": "ObjectId",
-  "farm_id": "string",
-  "plot_id": "string?",
-  "owner_id": "string",
-  "name": "string",
-  "device_uid": "string (unique)",
-  "device_type": "string",
-  "sensor_types": ["string"],
-  "status": "online | offline | maintenance",
-  "battery_level": "int (0-100)",
-  "signal_strength": "int",
-  "firmware_version": "string",
-  "last_sync": "datetime?",
-  "created_at": "datetime",
-  "updated_at": "datetime"
-}
+```
+id UUID, farm_id (FK farms), plot_id? (FK plots), owner_id (FK users), name,
+device_uid (unique), device_type, sensor_types (TEXT[]),
+status (online|offline|maintenance), battery_level (0-100), signal_strength,
+firmware_version, last_sync?, created_at, updated_at
 ```
 
-### Collection `sensor_readings`
+### Table `sensor_readings`
 
-```json
-{
-  "_id": "ObjectId",
-  "device_id": "string",
-  "plot_id": "string",
-  "owner_id": "string",
-  "soil_moisture": "float? (%)",
-  "soil_temperature": "float? (°C)",
-  "air_temperature": "float? (°C)",
-  "air_humidity": "float? (%)",
-  "luminosity": "float? (lux)",
-  "soil_nitrogen": "float? (mg/kg)",
-  "soil_phosphorus": "float? (mg/kg)",
-  "soil_potassium": "float? (mg/kg)",
-  "ph": "float?",
-  "conductivity": "float?",
-  "timestamp": "datetime"
-}
 ```
-
-### Collection `alerts`
-
-```json
-{
-  "_id": "ObjectId",
-  "owner_id": "string",
-  "device_id": "string",
-  "plot_id": "string",
-  "type": "string",
-  "severity": "low | medium | high | critical",
-  "title": "string",
-  "message": "string",
-  "is_read": "boolean",
-  "is_resolved": "boolean",
-  "resolved_at": "datetime?",
-  "created_at": "datetime"
-}
+id UUID, device_id (FK devices), plot_id? (FK plots), owner_id (FK users),
+soil_moisture? (%), soil_temperature? (°C), air_temperature? (°C), air_humidity? (%),
+luminosity? (lux), soil_nitrogen?/soil_phosphorus?/soil_potassium? (mg/kg),
+ph?, conductivity?, timestamp
 ```
+Index `BRIN` sur `timestamp` (série temporelle à fort volume) + `btree` sur `(device_id, timestamp DESC)`.
+
+### Table `alerts`
+
+```
+id UUID, owner_id (FK users), device_id? (FK devices), plot_id? (FK plots),
+type, severity (info|warning|critical), title, message, is_read, is_resolved,
+resolved_at?, created_at
+```
+Contrainte `UNIQUE (device_id, type) WHERE is_resolved = FALSE` : garantit qu'il n'existe
+jamais deux alertes ouvertes du même type pour un appareil (upsert atomique via `ON CONFLICT`).
+
+> Les tables `password_reset_tokens`, `login_attempts`, `predictions`, `notifications` et
+> `audit_logs` complètent le schéma opérationnel — voir le DDL pour le détail complet.
+
+### Schémas du lakehouse (`bronze` / `silver` / `gold`)
+
+Voir la section [Pipeline Big Data](#pipeline-big-data--lakehouse-bronzesilvergold-n8n) ci-dessous.
 
 ---
 
@@ -449,7 +420,10 @@ Dat'Agro est conçu pour recevoir des relevés d'un réseau de capteurs réel :
                      POST /api/ingest/batch
                                  │
                                  ▼
-                          Dat'Agro API → MongoDB → Dashboard / Alertes / Prédictions IA
+              Dat'Agro API → PostgreSQL (opérationnel + Bronze)
+                                 │
+                                 ▼
+        Dashboard / Alertes / Prédictions IA   +   pipeline n8n Bronze→Silver→Gold
 ```
 
 Le Raspberry Pi 4 est le **seul point du réseau connecté à Internet** : chaque nœud ESP32
@@ -502,11 +476,118 @@ La réponse indique le nombre de relevés acceptés et, pour chaque `device_uid`
 ```
 
 Un gabarit Python prêt à brancher sur votre code de réception LoRa est fourni dans
-[`hardware/raspberry_gateway_example.py`](hardware/raspberry_gateway_example.py).
+[`hardware/raspberry_gateway_example.py`](hardware/raspberry_gateway_example.py). Il utilise
+[`hardware/gateway_buffer.py`](hardware/gateway_buffer.py) (`BufferedSender`) pour bufferiser
+localement les relevés en cas de coupure réseau (le Pi4 étant le seul point connecté à Internet)
+et les renvoyer automatiquement à la reconnexion.
 
 > **Prédictions IA** : `_compute_predictions` dans `backend/server.py` est aujourd'hui un moteur
-> de règles/seuils simple, pas un modèle entraîné. Une fois ce pipeline en production et des
-> données réelles accumulées, cette fonction est le point d'entrée à remplacer par un vrai modèle.
+> de règles/seuils simple, pas un modèle entraîné. Une fois le pipeline lakehouse ci-dessous en
+> production et des données réelles accumulées dans `gold.plot_features`, cette fonction est le
+> point d'entrée à remplacer par un vrai modèle de prédiction d'humidité.
+
+---
+
+## Pipeline Big Data — Lakehouse Bronze/Silver/Gold (n8n)
+
+Chaque relevé accepté (manuel ou via la passerelle matérielle) est capturé une seconde fois,
+brut, dans une architecture médaillon PostgreSQL orchestrée par **n8n** — le cœur du pipeline Big
+Data du projet, indépendant de l'affichage temps réel du dashboard (qui continue de lire les
+tables opérationnelles).
+
+```
+POST /api/readings ou /api/ingest/batch
+              │
+              ▼
+   sensor_readings (opérationnel)  +  bronze.sensor_ingestions (capture brute JSONB)
+                                              │
+                                   n8n: Agro_Bronze_to_Silver (toutes les 2 min)
+                                   → normalisation, détection d'anomalies (plages plausibles)
+                                              ▼
+                                   silver.sensor_readings_clean (typé, dédupliqué, flagué)
+                                              │
+                                   n8n: Agro_Silver_to_Gold (toutes les heures)
+                                   → agrégats SQL (fenêtres, LAG, moyennes glissantes)
+                                              ▼
+                     gold.plot_hourly_agg / gold.plot_daily_agg / gold.plot_features
+                                              │
+                                              ▼
+                          Point d'extension : futur modèle de prédiction d'humidité
+```
+
+### Couches
+
+- **Bronze** (`bronze.sensor_ingestions`) : capture brute immuable, appareil validé mais valeurs
+  non vérifiées. Alimentée directement par `_ingest_reading()` dans `backend/server.py`, dans la
+  même transaction que l'écriture opérationnelle.
+- **Silver** (`silver.sensor_readings_clean`) : données typées, dédupliquées
+  (`UNIQUE(device_id, reading_ts)`), enrichies par jointure avec `devices`/`plots`/`farms`, avec
+  détection d'anomalies (`is_outlier`/`outlier_reason` sur des plages plausibles par capteur — les
+  valeurs suspectes sont conservées et flaguées, jamais supprimées silencieusement).
+- **Gold** (`gold.plot_hourly_agg`, `gold.plot_daily_agg`, `gold.plot_features`) : agrégats par
+  parcelle et table de features "ML-ready" (moyennes glissantes, valeurs décalées `LAG`) — le point
+  d'entrée pour un futur modèle de prédiction.
+
+DDL complet : [`pipeline/schema/bronze.sql`](pipeline/schema/bronze.sql),
+[`silver.sql`](pipeline/schema/silver.sql), [`gold.sql`](pipeline/schema/gold.sql).
+
+### Workflows n8n
+
+Exportés en JSON dans [`pipeline/n8n_workflows/`](pipeline/n8n_workflows/), à importer dans n8n
+(**Workflows → Import from File**) puis activer :
+
+| Workflow | Déclencheur | Rôle |
+|----------|-------------|------|
+| `Agro_Bronze_to_Silver.json` | Toutes les 2 min | Sélectionne le Bronze non traité, normalise/valide (nœud Code), upsert vers Silver, marque comme traité |
+| `Agro_Silver_to_Gold.json` | Toutes les heures | Agrège Silver → `plot_hourly_agg`, reconstruit `plot_features` par fonctions fenêtres SQL |
+
+Les deux workflows utilisent un credential Postgres nommé pointant vers `datagro_db` (à recréer
+dans n8n après import — **Credentials → New → Postgres**, avec les mêmes identifiants que
+`DATABASE_URL`).
+
+### Vérifier que le pipeline tourne
+
+```sql
+-- Combien de lignes Bronze en attente de traitement ?
+SELECT COUNT(*) FROM bronze.sensor_ingestions WHERE processed = FALSE;
+
+-- Le Silver se peuple-t-il ?
+SELECT COUNT(*), MAX(reading_ts) FROM silver.sensor_readings_clean;
+
+-- Le Gold se peuple-t-il ?
+SELECT * FROM gold.plot_hourly_agg ORDER BY hour_utc DESC LIMIT 5;
+```
+
+---
+
+## Simulateur de nœuds LoRa
+
+Le matériel réel (Système A) n'étant pas encore assemblé, un simulateur permet de développer et
+démontrer tout le pipeline dès maintenant : [`hardware/lora_node_simulator.py`](hardware/lora_node_simulator.py).
+
+Il réutilise **exactement le même contrat HTTP** que la passerelle réelle (`X-Gateway-Key`,
+`POST /api/ingest/batch`, tampon local via `gateway_buffer.BufferedSender`) — passer du simulateur
+au vrai matériel plus tard ne demande donc aucun changement backend.
+
+```bash
+cd hardware
+
+# 1re fois : crée une ferme/parcelle/appareils de démo via l'API (idempotent)
+python lora_node_simulator.py --bootstrap --nodes 4
+
+# Simulation en temps réel
+python lora_node_simulator.py
+
+# Générer rapidement plusieurs jours d'historique (temps accéléré)
+python lora_node_simulator.py --time-scale 120
+
+# Déclencher un événement de pluie en direct (autre terminal, sur l'instance en cours)
+python lora_node_simulator.py --trigger-rain
+```
+
+Modèle synthétique par nœud : cycles diurnes (température/luminosité), humidité du sol avec
+évapotranspiration + événements de pluie stochastiques, dérive lente NPK avec fertilisations
+rares, pH quasi stable, dérive de calibration par capteur, décrochages LoRa occasionnels.
 
 ---
 
@@ -515,11 +596,14 @@ Un gabarit Python prêt à brancher sur votre code de réception LoRa est fourni
 ```
 Data-Agro-Plateforme/
 ├── backend/
-│   ├── server.py              # Application FastAPI, routes, connexion DB
-│   ├── requirements.txt       # Dépendances Python
-│   ├── .env.example           # Gabarit des variables d'environnement
+│   ├── server.py                    # Application FastAPI, routes, logique métier
+│   ├── db.py                        # Pool asyncpg, sérialisation, helpers SQL
+│   ├── db/
+│   │   └── schema_operational.sql   # DDL du schéma opérationnel (users, farms, ...)
+│   ├── requirements.txt             # Dépendances Python
+│   ├── .env.example                 # Gabarit des variables d'environnement
 │   └── tests/
-│       └── test_datagro.py    # Tests pytest E2E backend
+│       └── test_datagro.py          # Tests pytest E2E backend
 │
 ├── frontend/
 │   └── src/
@@ -540,8 +624,19 @@ Data-Agro-Plateforme/
 │       ├── App.js             # Routes React Router v6
 │       └── index.css          # Variables CSS Tailwind
 │
+├── pipeline/
+│   ├── schema/
+│   │   ├── bronze.sql               # Capture brute
+│   │   ├── silver.sql               # Données nettoyées/dédupliquées
+│   │   └── gold.sql                 # Agrégats + features ML-ready
+│   └── n8n_workflows/
+│       ├── Agro_Bronze_to_Silver.json
+│       └── Agro_Silver_to_Gold.json
+│
 ├── hardware/
-│   └── raspberry_gateway_example.py  # Gabarit de passerelle LoRa → API
+│   ├── raspberry_gateway_example.py # Gabarit de passerelle LoRa → API (vrai matériel)
+│   ├── gateway_buffer.py            # Tampon local résilient (BufferedSender)
+│   └── lora_node_simulator.py       # Simulateur de nœuds ESP32/LoRa
 │
 └── README.md
 ```
@@ -572,9 +667,11 @@ pytest tests/ -v
 
 1. Mettre `secure=True` dans `set_cookies()` dans `server.py`
 2. Utiliser un `JWT_SECRET` fort (32+ caractères)
-3. Configurer MongoDB Atlas
-4. `CORS_ORIGINS` = domaine de production uniquement
-5. HTTPS obligatoire
+3. Configurer une instance PostgreSQL managée (ou auto-hébergée) et son `DATABASE_URL`
+4. Héberger n8n (Docker recommandé) et republier les workflows du pipeline avec le credential
+   Postgres de production
+5. `CORS_ORIGINS` = domaine de production uniquement
+6. HTTPS obligatoire
 
 ---
 
