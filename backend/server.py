@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-import os, secrets, hashlib, logging
+import os, secrets, hashlib, logging, uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
@@ -557,11 +557,16 @@ async def create_reading(data: ReadingCreate, request: Request):
     uid = u["id"]
     now = datetime.now(timezone.utc)
     values = {k: v for k, v in data.model_dump().items() if k not in ("device_id", "plot_id")}
-    reading = await _ingest_reading(uid, data.device_id, data.plot_id, values, now)
+    reading = await _ingest_reading(uid, data.device_id, data.plot_id, values, now,
+                                     source="manual_api", batch_id=uuid.uuid4())
     return doc(reading)
 
-async def _ingest_reading(owner_id, device_id, plot_id, values: dict, now: datetime):
-    """Shared by the manual /readings endpoint (JWT) and the hardware /ingest/batch endpoint (gateway key)."""
+async def _ingest_reading(owner_id, device_id, plot_id, values: dict, now: datetime,
+                           source: str, batch_id):
+    """Shared by the manual /readings endpoint (JWT) and the hardware /ingest/batch endpoint (gateway key).
+    Also dual-writes to bronze.sensor_ingestions (Bronze layer of the lakehouse pipeline) — the
+    raw capture happens here, after device_uid validation but before any sensor-value validation,
+    which Silver (n8n) is responsible for."""
     reading = {k: v for k, v in values.items() if v is not None}
     cols = ["device_id", "plot_id", "owner_id", '"timestamp"'] + list(reading.keys())
     placeholders = [f"${i + 1}" for i in range(len(cols))]
@@ -575,6 +580,10 @@ async def _ingest_reading(owner_id, device_id, plot_id, values: dict, now: datet
             await conn.execute(
                 "UPDATE devices SET last_sync = $1, status = 'online', signal_strength = 80, updated_at = $1 WHERE id = $2",
                 now, device_id)
+            await conn.execute(
+                """INSERT INTO bronze.sensor_ingestions (source, device_id, ingestion_batch_id, raw_payload)
+                   VALUES ($1,$2,$3,$4)""",
+                source, device_id, batch_id, {**reading, "timestamp": now.isoformat()})
     await _check_alerts(owner_id, device_id, plot_id, dict(row), now)
     return row
 
@@ -618,6 +627,7 @@ async def ingest_batch(data: BatchIngestReq, request: Request):
     farm_id = farm["id"]
     pool = get_pool()
     now = datetime.now(timezone.utc)
+    batch_id = uuid.uuid4()  # partagé par toutes les lectures de ce POST (traçabilité Bronze)
     accepted = 0
     rejected = []
     for item in data.readings:
@@ -628,7 +638,8 @@ async def ingest_batch(data: BatchIngestReq, request: Request):
                               "reason": "Appareil non enregistré pour cette exploitation"})
             continue
         values = item.model_dump(exclude={"device_uid"})
-        await _ingest_reading(device["owner_id"], device["id"], device["plot_id"], values, now)
+        await _ingest_reading(device["owner_id"], device["id"], device["plot_id"], values, now,
+                               source="gateway_batch", batch_id=batch_id)
         accepted += 1
     return {"accepted": accepted, "rejected": rejected}
 

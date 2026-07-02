@@ -28,15 +28,19 @@ import logging
 
 import requests
 
+from gateway_buffer import BufferedSender
+
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8001/api")
 GATEWAY_KEY = os.environ["GATEWAY_KEY"]
 GATEWAY_INTERVAL_SECONDS = int(os.environ.get("GATEWAY_INTERVAL_SECONDS", "60"))
+BUFFER_PATH = os.environ.get("GATEWAY_BUFFER_PATH", "buffer.jsonl")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("datagro-gateway")
 
 SESSION = requests.Session()
 SESSION.headers.update({"X-Gateway-Key": GATEWAY_KEY, "Content-Type": "application/json"})
+SENDER = BufferedSender(SESSION, API_BASE_URL, BUFFER_PATH)
 
 
 def read_lora_frames() -> list[dict]:
@@ -65,27 +69,15 @@ def read_lora_frames() -> list[dict]:
     )
 
 
-def send_batch(readings: list[dict]) -> None:
-    if not readings:
-        return
-    resp = SESSION.post(f"{API_BASE_URL}/ingest/batch", json={"readings": readings}, timeout=15)
-    resp.raise_for_status()
-    result = resp.json()
-    logger.info("Lot envoyé: %d accepté(s), %d rejeté(s)", result["accepted"], len(result["rejected"]))
-    for rej in result["rejected"]:
-        logger.warning("Rejeté — device_uid=%s: %s", rej["device_uid"], rej["reason"])
-
-
 def main():
-    logger.info("Passerelle Dat'Agro démarrée (intervalle=%ds, API=%s)", GATEWAY_INTERVAL_SECONDS, API_BASE_URL)
+    logger.info("Passerelle Dat'Agro démarrée (intervalle=%ds, API=%s, tampon=%s)",
+                GATEWAY_INTERVAL_SECONDS, API_BASE_URL, BUFFER_PATH)
     while True:
         try:
             readings = read_lora_frames()
-            send_batch(readings)
-        except requests.HTTPError as e:
-            logger.error("Erreur API (%s): %s", e.response.status_code, e.response.text)
+            SENDER.send_batch(readings)
         except Exception:
-            logger.exception("Erreur inattendue lors du cycle d'envoi")
+            logger.exception("Erreur inattendue lors du cycle de lecture LoRa")
         time.sleep(GATEWAY_INTERVAL_SECONDS)
 
 

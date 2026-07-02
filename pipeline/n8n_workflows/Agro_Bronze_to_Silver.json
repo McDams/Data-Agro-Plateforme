@@ -1,0 +1,85 @@
+{
+  "name": "Agro_Bronze_to_Silver",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "minutes", "minutesInterval": 2 }
+          ]
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000001",
+      "name": "Toutes les 2 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT b.id AS bronze_id, b.device_id, b.raw_payload, b.source,\n       d.plot_id, d.farm_id, d.owner_id\nFROM bronze.sensor_ingestions b\nJOIN devices d ON d.id = b.device_id\nWHERE b.processed = FALSE\nORDER BY b.received_at ASC\nLIMIT 500;",
+        "options": {}
+      },
+      "id": "a1000000-0000-4000-8000-000000000002",
+      "name": "Select Unprocessed Bronze",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [260, 0],
+      "credentials": {
+        "postgres": { "id": "XzoKYOGDRB4qKwbQ", "name": "Dat Agro Postgres (datagro_db)" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const RANGES = {\n  soil_moisture: [0, 100], air_humidity: [0, 100],\n  soil_temperature: [-10, 60], air_temperature: [-10, 60],\n  luminosity: [0, 150000],\n  soil_nitrogen: [0, 2000], soil_phosphorus: [0, 2000], soil_potassium: [0, 2000],\n  ph: [0, 14], conductivity: [0, 20],\n};\nconst FIELDS = Object.keys(RANGES);\n\nreturn $input.all().map(item => {\n  const d = item.json;\n  const payload = typeof d.raw_payload === 'string' ? JSON.parse(d.raw_payload) : (d.raw_payload || {});\n  const clean = {};\n  let outlierReason = null;\n  for (const f of FIELDS) {\n    let v = payload[f];\n    if (v === undefined || v === null || v === '') { clean[f] = null; continue; }\n    v = Number(v);\n    if (Number.isNaN(v)) {\n      clean[f] = null;\n      outlierReason = (outlierReason ? outlierReason + '; ' : '') + `${f} non numérique`;\n      continue;\n    }\n    const [lo, hi] = RANGES[f];\n    if (v < lo || v > hi) {\n      outlierReason = (outlierReason ? outlierReason + '; ' : '') + `${f}=${v} hors plage [${lo},${hi}]`;\n    }\n    clean[f] = v;\n  }\n  const readingTs = payload.timestamp || new Date().toISOString();\n  return {\n    json: {\n      bronze_id: d.bronze_id,\n      device_id: d.device_id,\n      plot_id: d.plot_id,\n      farm_id: d.farm_id,\n      owner_id: d.owner_id,\n      ...clean,\n      reading_ts: readingTs,\n      is_outlier: outlierReason !== null,\n      outlier_reason: outlierReason,\n      source: d.source,\n    }\n  };\n});"
+      },
+      "id": "a1000000-0000-4000-8000-000000000003",
+      "name": "Normalize & Flag Outliers",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO silver.sensor_readings_clean\n  (bronze_id, device_id, plot_id, farm_id, owner_id,\n   soil_moisture, soil_temperature, air_temperature, air_humidity, luminosity,\n   soil_nitrogen, soil_phosphorus, soil_potassium, ph, conductivity,\n   reading_ts, is_outlier, outlier_reason, source)\nVALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)\nON CONFLICT (bronze_id) DO NOTHING;",
+        "options": {
+          "queryReplacement": "={{ [$json.bronze_id, $json.device_id, $json.plot_id, $json.farm_id, $json.owner_id, $json.soil_moisture, $json.soil_temperature, $json.air_temperature, $json.air_humidity, $json.luminosity, $json.soil_nitrogen, $json.soil_phosphorus, $json.soil_potassium, $json.ph, $json.conductivity, $json.reading_ts, $json.is_outlier, $json.outlier_reason, $json.source] }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000004",
+      "name": "Upsert Silver",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [780, 0],
+      "credentials": {
+        "postgres": { "id": "XzoKYOGDRB4qKwbQ", "name": "Dat Agro Postgres (datagro_db)" }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE bronze.sensor_ingestions SET processed = TRUE, processed_at = now() WHERE id = $1;",
+        "options": {
+          "queryReplacement": "={{ [$json.bronze_id] }}"
+        }
+      },
+      "id": "a1000000-0000-4000-8000-000000000005",
+      "name": "Mark Bronze Processed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1040, 0],
+      "credentials": {
+        "postgres": { "id": "XzoKYOGDRB4qKwbQ", "name": "Dat Agro Postgres (datagro_db)" }
+      }
+    }
+  ],
+  "connections": {
+    "Toutes les 2 minutes": { "main": [[{ "node": "Select Unprocessed Bronze", "type": "main", "index": 0 }]] },
+    "Select Unprocessed Bronze": { "main": [[{ "node": "Normalize & Flag Outliers", "type": "main", "index": 0 }]] },
+    "Normalize & Flag Outliers": { "main": [[{ "node": "Upsert Silver", "type": "main", "index": 0 }]] },
+    "Upsert Silver": { "main": [[{ "node": "Mark Bronze Processed", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}

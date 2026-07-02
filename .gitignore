@@ -90,3 +90,7 @@ credentials.json
 *.key
 .credentials
 frontend/node_modules/.cache/default-development/3.pack
+
+# Simulateur LoRa : état local (contient une vraie clé de passerelle) + tampons
+hardware/.simulator_state.json
+hardware/*buffer*.jsonl

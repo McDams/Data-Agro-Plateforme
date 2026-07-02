@@ -1,0 +1,54 @@
+{
+  "name": "Agro_Silver_to_Gold",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "hours", "hoursInterval": 1 }
+          ]
+        }
+      },
+      "id": "a2000000-0000-4000-8000-000000000001",
+      "name": "Toutes les heures",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO gold.plot_hourly_agg (plot_id, device_id, hour_utc,\n  avg_soil_moisture, min_soil_moisture, max_soil_moisture,\n  avg_soil_temperature, avg_air_temperature, avg_air_humidity, avg_luminosity,\n  avg_soil_nitrogen, avg_soil_phosphorus, avg_soil_potassium, avg_ph, avg_conductivity,\n  samples_count, computed_at)\nSELECT plot_id, device_id, DATE_TRUNC('hour', reading_ts),\n  AVG(soil_moisture), MIN(soil_moisture), MAX(soil_moisture),\n  AVG(soil_temperature), AVG(air_temperature), AVG(air_humidity), AVG(luminosity),\n  AVG(soil_nitrogen), AVG(soil_phosphorus), AVG(soil_potassium), AVG(ph), AVG(conductivity),\n  COUNT(*), now()\nFROM silver.sensor_readings_clean\nWHERE is_outlier = FALSE\n  AND plot_id IS NOT NULL\n  AND reading_ts >= DATE_TRUNC('hour', NOW()) - INTERVAL '1 hour'\n  AND reading_ts <  DATE_TRUNC('hour', NOW())\nGROUP BY plot_id, device_id, DATE_TRUNC('hour', reading_ts)\nON CONFLICT (plot_id, device_id, hour_utc) DO UPDATE SET\n  avg_soil_moisture = EXCLUDED.avg_soil_moisture,\n  min_soil_moisture = EXCLUDED.min_soil_moisture,\n  max_soil_moisture = EXCLUDED.max_soil_moisture,\n  avg_soil_temperature = EXCLUDED.avg_soil_temperature,\n  avg_air_temperature = EXCLUDED.avg_air_temperature,\n  avg_air_humidity = EXCLUDED.avg_air_humidity,\n  avg_luminosity = EXCLUDED.avg_luminosity,\n  avg_soil_nitrogen = EXCLUDED.avg_soil_nitrogen,\n  avg_soil_phosphorus = EXCLUDED.avg_soil_phosphorus,\n  avg_soil_potassium = EXCLUDED.avg_soil_potassium,\n  avg_ph = EXCLUDED.avg_ph,\n  avg_conductivity = EXCLUDED.avg_conductivity,\n  samples_count = EXCLUDED.samples_count,\n  computed_at = now();",
+        "options": {}
+      },
+      "id": "a2000000-0000-4000-8000-000000000002",
+      "name": "Aggregate Previous Hour",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [260, 0],
+      "credentials": {
+        "postgres": { "id": "XzoKYOGDRB4qKwbQ", "name": "Dat Agro Postgres (datagro_db)" }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH plot_hourly AS (\n  SELECT plot_id, hour_utc,\n    AVG(avg_soil_moisture) AS avg_soil_moisture,\n    AVG(avg_air_temperature) AS avg_air_temperature,\n    AVG(avg_air_humidity) AS avg_air_humidity,\n    AVG(avg_luminosity) AS avg_luminosity\n  FROM gold.plot_hourly_agg\n  GROUP BY plot_id, hour_utc\n)\nINSERT INTO gold.plot_features (plot_id, hour_utc,\n  soil_moisture_avg, soil_moisture_lag1h, soil_moisture_lag24h,\n  soil_moisture_rolling_mean_6h, soil_moisture_rolling_std_6h,\n  air_temperature_avg, air_humidity_avg, luminosity_avg, computed_at)\nSELECT plot_id, hour_utc,\n  avg_soil_moisture,\n  LAG(avg_soil_moisture, 1) OVER w,\n  LAG(avg_soil_moisture, 24) OVER w,\n  AVG(avg_soil_moisture) OVER (PARTITION BY plot_id ORDER BY hour_utc ROWS BETWEEN 5 PRECEDING AND CURRENT ROW),\n  STDDEV(avg_soil_moisture) OVER (PARTITION BY plot_id ORDER BY hour_utc ROWS BETWEEN 5 PRECEDING AND CURRENT ROW),\n  avg_air_temperature, avg_air_humidity, avg_luminosity, now()\nFROM plot_hourly\nWINDOW w AS (PARTITION BY plot_id ORDER BY hour_utc)\nON CONFLICT (plot_id, hour_utc) DO UPDATE SET\n  soil_moisture_avg = EXCLUDED.soil_moisture_avg,\n  soil_moisture_lag1h = EXCLUDED.soil_moisture_lag1h,\n  soil_moisture_lag24h = EXCLUDED.soil_moisture_lag24h,\n  soil_moisture_rolling_mean_6h = EXCLUDED.soil_moisture_rolling_mean_6h,\n  soil_moisture_rolling_std_6h = EXCLUDED.soil_moisture_rolling_std_6h,\n  air_temperature_avg = EXCLUDED.air_temperature_avg,\n  air_humidity_avg = EXCLUDED.air_humidity_avg,\n  luminosity_avg = EXCLUDED.luminosity_avg,\n  computed_at = now();",
+        "options": {}
+      },
+      "id": "a2000000-0000-4000-8000-000000000003",
+      "name": "Rebuild Feature Table",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [520, 0],
+      "credentials": {
+        "postgres": { "id": "XzoKYOGDRB4qKwbQ", "name": "Dat Agro Postgres (datagro_db)" }
+      }
+    }
+  ],
+  "connections": {
+    "Toutes les heures": { "main": [[{ "node": "Aggregate Previous Hour", "type": "main", "index": 0 }]] },
+    "Aggregate Previous Hour": { "main": [[{ "node": "Rebuild Feature Table", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" }
+}
